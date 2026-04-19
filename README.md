@@ -40,9 +40,9 @@ Detail Daemon.
 
 ## Credits
 
-The schedule shaping helpers in `schedule.py` are vendored from
-[ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon) by
-Jonseed (MIT). See `LICENSE-THIRD-PARTY`.
+Inspired by [ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon)
+by Jonseed; the schedule shape used to gate the active window follows the same
+idea.
 
 ## License
 

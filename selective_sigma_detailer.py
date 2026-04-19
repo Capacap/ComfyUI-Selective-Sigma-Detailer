@@ -18,7 +18,60 @@ from comfy.samplers import KSAMPLER
 from PIL import Image
 import folder_paths
 
-from .schedule import make_detail_daemon_schedule, get_dd_schedule
+def _make_schedule(
+    steps, start, end, bias, amount, exponent,
+    start_offset, end_offset, fade, smooth,
+):
+    start = min(start, end)
+    mid = start + bias * (end - start)
+    multipliers = np.zeros(steps)
+
+    start_idx, mid_idx, end_idx = [
+        int(round(x * (steps - 1))) for x in [start, mid, end]
+    ]
+
+    start_values = np.linspace(0, 1, mid_idx - start_idx + 1)
+    if smooth:
+        start_values = 0.5 * (1 - np.cos(start_values * np.pi))
+    start_values = start_values ** exponent
+    if start_values.any():
+        start_values *= amount - start_offset
+        start_values += start_offset
+
+    end_values = np.linspace(1, 0, end_idx - mid_idx + 1)
+    if smooth:
+        end_values = 0.5 * (1 - np.cos(end_values * np.pi))
+    end_values = end_values ** exponent
+    if end_values.any():
+        end_values *= amount - end_offset
+        end_values += end_offset
+
+    multipliers[start_idx : mid_idx + 1] = start_values
+    multipliers[mid_idx : end_idx + 1] = end_values
+    multipliers[:start_idx] = start_offset
+    multipliers[end_idx + 1 :] = end_offset
+    multipliers *= 1 - fade
+    return multipliers
+
+
+def _sample_schedule(sigma, sigmas, schedule):
+    sched_len = len(schedule)
+    if sched_len < 2 or len(sigmas) < 2 or sigma <= 0 or not (sigmas[-1] <= sigma <= sigmas[0]):
+        return 0.0
+    deltas = (sigmas[:-1] - sigma).abs()
+    idx = int(deltas.argmin())
+    if (
+        (idx == 0 and sigma >= sigmas[0])
+        or (idx == sched_len - 1 and sigma <= sigmas[-2])
+        or deltas[idx] == 0
+    ):
+        return schedule[idx].item()
+    idxlow, idxhigh = (idx, idx - 1) if sigma > sigmas[idx] else (idx + 1, idx)
+    nlow, nhigh = sigmas[idxlow], sigmas[idxhigh]
+    if nhigh - nlow == 0:
+        return schedule[idxlow]
+    ratio = ((sigma - nlow) / (nhigh - nlow)).clamp(0, 1)
+    return torch.lerp(schedule[idxlow], schedule[idxhigh], ratio).item()
 
 
 def _save_mask_preview(mask: torch.Tensor, upscale: int = 8) -> str:
@@ -86,7 +139,7 @@ def selective_sigma_detailer_sampler(
         maybe_cfg = getattr(model.inner_model, "cfg", None)
         cfg_scale = float(maybe_cfg) if isinstance(maybe_cfg, (int, float)) else 1.0
 
-    dd_schedule = torch.tensor(
+    schedule = torch.tensor(
         ssd_make_schedule(len(sigmas) - 1), dtype=torch.float32, device="cpu"
     )
     sigmas_cpu = sigmas.detach().clone().cpu()
@@ -100,8 +153,8 @@ def selective_sigma_detailer_sampler(
         if not (sigma_min <= sigma_float <= sigma_max):
             return model(x, sigma, **extra_args)
 
-        dd_adjustment = get_dd_schedule(sigma_float, sigmas_cpu, dd_schedule) * 0.1
-        if dd_adjustment == 0.0:
+        adjustment = _sample_schedule(sigma_float, sigmas_cpu, schedule) * 0.1
+        if adjustment == 0.0:
             return model(x, sigma, **extra_args)
 
         denoised_normal = model(x, sigma, **extra_args)
@@ -124,7 +177,7 @@ def selective_sigma_detailer_sampler(
                 mask, size=denoised_normal.shape[-2:], mode="bilinear", align_corners=False
             )
 
-        adjusted_sigma = sigma * max(1e-6, 1.0 - dd_adjustment * cfg_scale)
+        adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment * cfg_scale)
         denoised_detailed = model(x, adjusted_sigma, **extra_args)
 
         m = mask.to(denoised_normal)
@@ -198,7 +251,7 @@ class SelectiveSigmaDetailerNode:
         save_mask_preview,
     ):
         def ssd_make_schedule(steps):
-            return make_detail_daemon_schedule(
+            return _make_schedule(
                 steps, start, end, bias, detail_amount, exponent,
                 start_offset, end_offset, fade, smooth,
             )

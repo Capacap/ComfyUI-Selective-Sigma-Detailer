@@ -1,0 +1,13 @@
+[project]
+name = "comfyui-selective-sigma-detailer"
+description = "A ComfyUI sampler that boosts detail only in latent regions that are already dense at the moment the schedule activates."
+version = "0.1.0"
+license = {file = "LICENSE"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/capacap/ComfyUI-Selective-Sigma-Detailer"
+
+[tool.comfy]
+PublisherId = "capacap"
+DisplayName = "ComfyUI-Selective-Sigma-Detailer"

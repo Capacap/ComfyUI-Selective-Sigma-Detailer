@@ -27,14 +27,15 @@ def _mask_delta(denoised, x, sigma, state, p):
     if prev is None:
         return None
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
-    m = normalize_mask(raw, _MASK_CLIP_PERCENTILE)
+    m = normalize_mask(raw, p["clip_percentile"])
     prev_mask = state.get("mask")
-    if prev_mask is not None:
+    ema = p["ema"]
+    if prev_mask is not None and ema > 0:
         if prev_mask.shape != m.shape:
             prev_mask = torch.nn.functional.interpolate(
                 prev_mask, size=m.shape[-2:], mode="bilinear", align_corners=False,
             )
-        m = _MASK_EMA * prev_mask + (1 - _MASK_EMA) * m
+        m = ema * prev_mask + (1 - ema) * m
     state["mask"] = m
     shift = 2 * (p["coverage"] - 0.5)
     if shift != 0:
@@ -50,8 +51,8 @@ class SelectiveSigmaDetailerDeltaV2Node:
         "step count so intensity is roughly step-count invariant."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
-    RETURN_TYPES = ("SAMPLER", "SSD_MASK_REF")
-    RETURN_NAMES = ("sampler", "mask_ref")
+    RETURN_TYPES = ("SAMPLER",)
+    RETURN_NAMES = ("sampler",)
     FUNCTION = "go"
 
     @classmethod
@@ -70,17 +71,20 @@ class SelectiveSigmaDetailerDeltaV2Node:
         def schedule_fn(steps):
             return make_schedule(steps, _SCHEDULE_START, intensity)
 
-        mask_params = {"coverage": coverage}
-        mask_ref = {}
+        mask_params = {
+            "coverage": coverage,
+            "ema": _MASK_EMA,
+            "clip_percentile": _MASK_CLIP_PERCENTILE,
+        }
         ksampler = build_sampler(
             wrapped_sampler=sampler,
             make_schedule_fn=schedule_fn,
             mask_fn=_mask_delta,
             mask_params=mask_params,
-            mask_ref=mask_ref,
+            mask_ref={},
             normalize_by_active_steps=True,
         )
-        return (ksampler, mask_ref)
+        return (ksampler,)
 
 
 _REFERENCE_ACTIVE_STEPS = 16
@@ -96,8 +100,8 @@ class SelectiveSigmaDetailerPatchModelNode:
         "reference, so magnitude may need retuning on very short or long runs."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
-    RETURN_TYPES = ("MODEL", "SSD_MASK_REF")
-    RETURN_NAMES = ("model", "mask_ref")
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
     FUNCTION = "patch"
 
     @classmethod
@@ -163,18 +167,68 @@ class SelectiveSigmaDetailerPatchModelNode:
 
         patched = model.clone()
         patched.set_model_unet_function_wrapper(wrapper)
-        return (patched, mask_ref)
+        return (patched,)
+
+
+class SelectiveSigmaDetailerDebugNode:
+    DESCRIPTION = (
+        "Debug variant of the SAMPLER node. Exposes the hardcoded constants "
+        "(schedule start, ema, mask clip percentile) and the mask_ref output "
+        "so the mask can be inspected via the debug preview node. Defaults "
+        "match the main node's internal values; change them only to "
+        "experiment or diagnose unexpected behavior."
+    )
+    CATEGORY = "sampling/custom_sampling/samplers"
+    RETURN_TYPES = ("SAMPLER", "SSD_MASK_REF")
+    RETURN_NAMES = ("sampler", "mask_ref")
+    FUNCTION = "go"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler": ("SAMPLER",),
+                "intensity": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "start": ("FLOAT", {"default": _SCHEDULE_START, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Fraction of schedule to skip before applying detail. At least 1 step is always skipped."}),
+                "ema": ("FLOAT", {"default": _MASK_EMA, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Temporal mask smoothing. 0 = per-step, higher = stronger carryover across steps."}),
+                "mask_clip_percentile": ("FLOAT", {"default": _MASK_CLIP_PERCENTILE, "min": 0.0, "max": 0.49, "step": 0.005,
+                    "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch."}),
+            }
+        }
+
+    def go(self, sampler, intensity, coverage, start, ema, mask_clip_percentile):
+        def schedule_fn(steps):
+            return make_schedule(steps, start, intensity)
+
+        mask_params = {
+            "coverage": coverage,
+            "ema": ema,
+            "clip_percentile": mask_clip_percentile,
+        }
+        mask_ref = {}
+        ksampler = build_sampler(
+            wrapped_sampler=sampler,
+            make_schedule_fn=schedule_fn,
+            mask_fn=_mask_delta,
+            mask_params=mask_params,
+            mask_ref=mask_ref,
+            normalize_by_active_steps=True,
+        )
+        return (ksampler, mask_ref)
 
 
 class SelectiveSigmaDetailerMaskPreviewNode:
     DESCRIPTION = (
-        "Displays the mask captured during sampling. Place between a Selective "
-        "Sigma Detailer sampler's mask_ref output and downstream latent use; "
-        "the latent passthrough forces this node to run after sampling."
+        "Debug preview for the mask captured during sampling. Pairs with the "
+        "Debug sampler's mask_ref output. The latent passthrough forces this "
+        "node to run after sampling."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
-    RETURN_TYPES = ("IMAGE", "LATENT")
-    RETURN_NAMES = ("preview", "latent")
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
     FUNCTION = "preview"
     OUTPUT_NODE = True
 
@@ -184,17 +238,15 @@ class SelectiveSigmaDetailerMaskPreviewNode:
             "required": {
                 "mask_ref": ("SSD_MASK_REF",),
                 "latent": ("LATENT",),
-                "upscale": ("INT", {"default": 8, "min": 1, "max": 16, "step": 1,
-                    "tooltip": "Nearest-neighbor upscale factor for the preview image."}),
             }
         }
 
-    def preview(self, mask_ref, latent, upscale):
+    def preview(self, mask_ref, latent):
         mask = mask_ref.get("mask") if isinstance(mask_ref, dict) else None
         if mask is None:
             img = torch.zeros(1, 64, 64, 3)
         else:
-            img = mask_to_preview_image(mask, upscale=upscale)
+            img = mask_to_preview_image(mask, upscale=8)
 
         out_dir = folder_paths.get_temp_directory()
         os.makedirs(out_dir, exist_ok=True)
@@ -205,5 +257,5 @@ class SelectiveSigmaDetailerMaskPreviewNode:
 
         return {
             "ui": {"images": [{"filename": filename, "subfolder": "", "type": "temp"}]},
-            "result": (img, latent),
+            "result": (latent,),
         }

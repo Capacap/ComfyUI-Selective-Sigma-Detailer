@@ -1,24 +1,18 @@
 from .selective_sigma_detailer import (
     SelectiveSigmaDetailerDeltaNode,
-    SelectiveSigmaDetailerDynamicVarianceNode,
-    SelectiveSigmaDetailerEdgesNode,
+    SelectiveSigmaDetailerDeltaV2Node,
     SelectiveSigmaDetailerMaskPreviewNode,
-    SelectiveSigmaDetailerNode,
 )
 
 NODE_CLASS_MAPPINGS = {
-    "SelectiveSigmaDetailerNode": SelectiveSigmaDetailerNode,
-    "SelectiveSigmaDetailerDynamicVarianceNode": SelectiveSigmaDetailerDynamicVarianceNode,
     "SelectiveSigmaDetailerDeltaNode": SelectiveSigmaDetailerDeltaNode,
-    "SelectiveSigmaDetailerEdgesNode": SelectiveSigmaDetailerEdgesNode,
+    "SelectiveSigmaDetailerDeltaV2Node": SelectiveSigmaDetailerDeltaV2Node,
     "SelectiveSigmaDetailerMaskPreviewNode": SelectiveSigmaDetailerMaskPreviewNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SelectiveSigmaDetailerNode": "Selective Sigma Detailer (Variance Snapshot)",
-    "SelectiveSigmaDetailerDynamicVarianceNode": "Selective Sigma Detailer (Dynamic Variance)",
     "SelectiveSigmaDetailerDeltaNode": "Selective Sigma Detailer (Delta)",
-    "SelectiveSigmaDetailerEdgesNode": "Selective Sigma Detailer (Edges)",
+    "SelectiveSigmaDetailerDeltaV2Node": "Selective Sigma Detailer (Delta V2)",
     "SelectiveSigmaDetailerMaskPreviewNode": "Selective Sigma Detailer Mask Preview",
 }
 

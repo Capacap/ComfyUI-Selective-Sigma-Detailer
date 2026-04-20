@@ -12,11 +12,9 @@ from .ssd_core import (
     MASK_COMMON_INPUTS,
     SCHEDULE_INPUTS,
     build_sampler,
-    local_variance,
     make_schedule,
     mask_to_preview_image,
     postprocess_mask,
-    sobel_magnitude,
 )
 
 
@@ -42,37 +40,16 @@ def _pop_mask_common(kwargs):
     }
 
 
-def _mask_variance_snapshot(denoised, x, sigma, state, p):
-    if "mask" in state:
-        return state["mask"]
-    raw = local_variance(denoised, p["variance_kernel"])
-    m = postprocess_mask(raw, p["blur"], p["threshold"], p["gamma"])
-    state["mask"] = m
-    return m
-
-
-def _mask_variance_dynamic(denoised, x, sigma, state, p):
-    raw = local_variance(denoised, p["variance_kernel"])
-    m = postprocess_mask(raw, p["blur"], p["threshold"], p["gamma"])
-    prev = state.get("mask")
-    ema = p["ema"]
-    if prev is not None and ema > 0:
-        if prev.shape != m.shape:
-            prev = torch.nn.functional.interpolate(
-                prev, size=m.shape[-2:], mode="bilinear", align_corners=False,
-            )
-        m = ema * prev + (1 - ema) * m
-    state["mask"] = m
-    return m
-
-
 def _mask_delta(denoised, x, sigma, state, p):
     prev = state.get("prev_denoised")
     state["prev_denoised"] = denoised.detach()
     if prev is None:
         return None
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
-    m = postprocess_mask(raw, p["blur"], p["threshold"], p["gamma"])
+    m = postprocess_mask(
+        raw, p["blur"], p["threshold"], p["gamma"],
+        rank_normalize=p.get("rank_normalize", False),
+    )
     prev_mask = state.get("mask")
     ema = p["ema"]
     if prev_mask is not None and ema > 0:
@@ -85,20 +62,15 @@ def _mask_delta(denoised, x, sigma, state, p):
     return m
 
 
-def _mask_edges(denoised, x, sigma, state, p):
-    raw = sobel_magnitude(denoised)
-    m = postprocess_mask(raw, p["blur"], p["threshold"], p["gamma"])
-    state["mask"] = m
-    return m
-
-
 class _SSDBase:
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER", "SSD_MASK_REF")
     RETURN_NAMES = ("sampler", "mask_ref")
     FUNCTION = "go"
 
-    MASK_FN = None  # set by subclass
+    MASK_FN = None
+    NORMALIZE_BY_ACTIVE_STEPS = False
+    RANK_NORMALIZE_MASK = False
 
     @classmethod
     def _base_inputs(cls):
@@ -111,7 +83,7 @@ class _SSDBase:
     def go(self, sampler, **kwargs):
         sched_kwargs = _pop_schedule_kwargs(kwargs)
         mask_common = _pop_mask_common(kwargs)
-        mask_params = {**mask_common, **kwargs}
+        mask_params = {**mask_common, **kwargs, "rank_normalize": self.RANK_NORMALIZE_MASK}
         mask_ref = {}
         ksampler = build_sampler(
             wrapped_sampler=sampler,
@@ -120,46 +92,9 @@ class _SSDBase:
             mask_fn=self.MASK_FN,
             mask_params=mask_params,
             mask_ref=mask_ref,
+            normalize_by_active_steps=self.NORMALIZE_BY_ACTIVE_STEPS,
         )
         return (ksampler, mask_ref)
-
-
-class SelectiveSigmaDetailerNode(_SSDBase):
-    DESCRIPTION = (
-        "Boosts detail in dense regions using a frozen variance mask snapshot "
-        "taken at the first active step. Costs 2x model calls during active steps."
-    )
-    MASK_FN = staticmethod(_mask_variance_snapshot)
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                **cls._base_inputs(),
-                "variance_kernel": ("INT", {"default": 5, "min": 3, "max": 15, "step": 2,
-                    "tooltip": "Window size for local variance. Larger = coarser density estimate."}),
-            }
-        }
-
-
-class SelectiveSigmaDetailerDynamicVarianceNode(_SSDBase):
-    DESCRIPTION = (
-        "Like the variance variant, but recomputes the mask each active step "
-        "with an EMA blend so the mask follows composition as it develops."
-    )
-    MASK_FN = staticmethod(_mask_variance_dynamic)
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                **cls._base_inputs(),
-                "variance_kernel": ("INT", {"default": 5, "min": 3, "max": 15, "step": 2,
-                    "tooltip": "Window size for local variance. Larger = coarser density estimate."}),
-                "ema": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Blend with previous mask. 0 = fully dynamic, 1 = fully frozen at first step."}),
-            }
-        }
 
 
 class SelectiveSigmaDetailerDeltaNode(_SSDBase):
@@ -181,16 +116,26 @@ class SelectiveSigmaDetailerDeltaNode(_SSDBase):
         }
 
 
-class SelectiveSigmaDetailerEdgesNode(_SSDBase):
+class SelectiveSigmaDetailerDeltaV2Node(_SSDBase):
     DESCRIPTION = (
-        "Masks using Sobel gradient magnitude on the denoised prediction: "
-        "targets contours and silhouettes rather than textured fields."
+        "Experimental delta variant. Divides the per-step sigma adjustment by "
+        "the active-step count so the integrated detail push is roughly "
+        "invariant to total step count. Expect detail_amount to need a larger "
+        "value (order ~N_active) than the v1 node for comparable output."
     )
-    MASK_FN = staticmethod(_mask_edges)
+    MASK_FN = staticmethod(_mask_delta)
+    NORMALIZE_BY_ACTIVE_STEPS = True
+    RANK_NORMALIZE_MASK = True
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": cls._base_inputs()}
+        return {
+            "required": {
+                **cls._base_inputs(),
+                "ema": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Blend with previous mask. 0 = per-step, 1 = lock the first computed mask."}),
+            }
+        }
 
 
 class SelectiveSigmaDetailerMaskPreviewNode:

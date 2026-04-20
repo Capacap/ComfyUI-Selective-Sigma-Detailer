@@ -62,50 +62,26 @@ def sample_schedule(sigma, sigmas, schedule):
     return torch.lerp(schedule[idxlow], schedule[idxhigh], ratio).item()
 
 
-def postprocess_mask(raw, blur, threshold, gamma):
+def postprocess_mask(raw, blur, threshold, gamma, rank_normalize=False):
     if blur > 0:
         bk = blur * 2 + 1
         padded = F.pad(raw, (blur, blur, blur, blur), mode="reflect")
         raw = F.avg_pool2d(padded, bk, stride=1, padding=0)
     b = raw.shape[0]
     flat = raw.view(b, -1)
-    lo = flat.min(dim=1, keepdim=True).values
-    hi = flat.max(dim=1, keepdim=True).values
-    norm = ((flat - lo) / (hi - lo + 1e-8)).view_as(raw)
+    if rank_normalize:
+        n = flat.shape[1]
+        ranks = flat.argsort(dim=1).argsort(dim=1).float()
+        norm = (ranks / max(1, n - 1)).view_as(raw)
+    else:
+        lo = flat.min(dim=1, keepdim=True).values
+        hi = flat.max(dim=1, keepdim=True).values
+        norm = ((flat - lo) / (hi - lo + 1e-8)).view_as(raw)
     if threshold > 0:
         norm = (norm - threshold).clamp(min=0) / max(1e-8, 1.0 - threshold)
     if gamma != 1.0:
         norm = norm.clamp(min=0).pow(gamma)
     return norm.clamp(0, 1)
-
-
-def local_variance(denoised, kernel):
-    k = kernel | 1
-    pad = k // 2
-    padded = F.pad(denoised, (pad, pad, pad, pad), mode="reflect")
-    mean = F.avg_pool2d(padded, k, stride=1, padding=0)
-    diff_sq = (denoised - mean).pow(2)
-    diff_sq_padded = F.pad(diff_sq, (pad, pad, pad, pad), mode="reflect")
-    var = F.avg_pool2d(diff_sq_padded, k, stride=1, padding=0)
-    return var.mean(dim=1, keepdim=True).sqrt()
-
-
-def sobel_magnitude(denoised):
-    sx = torch.tensor(
-        [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
-        dtype=denoised.dtype, device=denoised.device,
-    ).view(1, 1, 3, 3)
-    sy = torch.tensor(
-        [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
-        dtype=denoised.dtype, device=denoised.device,
-    ).view(1, 1, 3, 3)
-    c = denoised.shape[1]
-    sx = sx.expand(c, 1, 3, 3)
-    sy = sy.expand(c, 1, 3, 3)
-    padded = F.pad(denoised, (1, 1, 1, 1), mode="reflect")
-    gx = F.conv2d(padded, sx, padding=0, groups=c)
-    gy = F.conv2d(padded, sy, padding=0, groups=c)
-    return (gx.pow(2) + gy.pow(2)).sqrt().mean(dim=1, keepdim=True)
 
 
 def mask_to_preview_image(mask, upscale=8):
@@ -117,7 +93,7 @@ def mask_to_preview_image(mask, upscale=8):
 
 
 def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
-                  mask_fn, mask_params, mask_ref):
+                  mask_fn, mask_params, mask_ref, normalize_by_active_steps=False):
     """Wraps `wrapped_sampler` with sigma-shift detail blending.
 
     `mask_fn(denoised, x, sigma, state, params) -> mask [B,1,H,W]` is invoked
@@ -136,6 +112,11 @@ def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
         )
+        if normalize_by_active_steps:
+            active_count = int((schedule != 0).sum())
+            adjustment_scale = 1.0 / max(1, active_count)
+        else:
+            adjustment_scale = 1.0
         sigmas_cpu = sigmas.detach().clone().cpu()
         sigma_max = float(sigmas_cpu[0])
         sigma_min = float(sigmas_cpu[-1]) + 1e-5
@@ -147,7 +128,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
             if not (sigma_min <= sigma_float <= sigma_max):
                 return model(x, sigma, **extra_args)
 
-            adjustment = sample_schedule(sigma_float, sigmas_cpu, schedule) * 0.1
+            adjustment = sample_schedule(sigma_float, sigmas_cpu, schedule) * 0.1 * adjustment_scale
             if adjustment == 0.0:
                 return model(x, sigma, **extra_args)
 
@@ -179,7 +160,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
 
 
 SCHEDULE_INPUTS = {
-    "detail_amount": ("FLOAT", {"default": 0.4, "min": -5.0, "max": 5.0, "step": 0.01}),
+    "detail_amount": ("FLOAT", {"default": 0.4, "min": -100.0, "max": 100.0, "step": 0.01}),
     "start": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
     "end": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
     "bias": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),

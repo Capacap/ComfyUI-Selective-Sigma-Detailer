@@ -9,35 +9,11 @@ from PIL import Image
 import folder_paths
 
 from .ssd_core import (
-    MASK_COMMON_INPUTS,
-    SCHEDULE_INPUTS,
     build_sampler,
     make_schedule,
     mask_to_preview_image,
-    postprocess_mask,
+    normalize_mask,
 )
-
-
-def _schedule_closure(kw):
-    def inner(steps):
-        return make_schedule(
-            steps, kw["start"], kw["end"], kw["bias"], kw["detail_amount"],
-            kw["exponent"], kw["start_offset"], kw["end_offset"],
-            kw["fade"], kw["smooth"],
-        )
-    return inner
-
-
-def _pop_schedule_kwargs(kwargs):
-    return {k: kwargs.pop(k) for k in list(SCHEDULE_INPUTS.keys())}
-
-
-def _pop_mask_common(kwargs):
-    return {
-        "blur": kwargs.pop("mask_blur"),
-        "threshold": kwargs.pop("mask_threshold"),
-        "gamma": kwargs.pop("mask_gamma"),
-    }
 
 
 def _mask_delta(denoised, x, sigma, state, p):
@@ -46,10 +22,7 @@ def _mask_delta(denoised, x, sigma, state, p):
     if prev is None:
         return None
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
-    m = postprocess_mask(
-        raw, p["blur"], p["threshold"], p["gamma"],
-        clip_percentile=p.get("clip_percentile", 0.0),
-    )
+    m = normalize_mask(raw, p["clip_percentile"])
     prev_mask = state.get("mask")
     ema = p["ema"]
     if prev_mask is not None and ema > 0:
@@ -62,83 +35,48 @@ def _mask_delta(denoised, x, sigma, state, p):
     return m
 
 
-class _SSDBase:
+class SelectiveSigmaDetailerDeltaV2Node:
+    DESCRIPTION = (
+        "Masks using |denoised_t - denoised_{t-1}| with percentile-clipped "
+        "normalization. Per-step sigma adjustment is divided by the count of "
+        "active schedule steps so detail_amount is roughly step-count "
+        "invariant. First active step is a no-op (no previous prediction)."
+    )
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER", "SSD_MASK_REF")
     RETURN_NAMES = ("sampler", "mask_ref")
     FUNCTION = "go"
 
-    MASK_FN = None
-    NORMALIZE_BY_ACTIVE_STEPS = False
-    MASK_CLIP_PERCENTILE = 0.0
-
-    @classmethod
-    def _base_inputs(cls):
-        return {
-            "sampler": ("SAMPLER",),
-            **SCHEDULE_INPUTS,
-            **MASK_COMMON_INPUTS,
-        }
-
-    def go(self, sampler, **kwargs):
-        sched_kwargs = _pop_schedule_kwargs(kwargs)
-        mask_common = _pop_mask_common(kwargs)
-        clip_percentile = kwargs.pop("mask_clip_percentile", self.MASK_CLIP_PERCENTILE)
-        mask_params = {**mask_common, **kwargs, "clip_percentile": clip_percentile}
-        mask_ref = {}
-        ksampler = build_sampler(
-            wrapped_sampler=sampler,
-            make_schedule_fn=_schedule_closure(sched_kwargs),
-            cfg_scale_override=sched_kwargs["cfg_scale_override"],
-            mask_fn=self.MASK_FN,
-            mask_params=mask_params,
-            mask_ref=mask_ref,
-            normalize_by_active_steps=self.NORMALIZE_BY_ACTIVE_STEPS,
-        )
-        return (ksampler, mask_ref)
-
-
-class SelectiveSigmaDetailerDeltaNode(_SSDBase):
-    DESCRIPTION = (
-        "Masks using |denoised_t - denoised_{t-1}|: targets regions the model "
-        "is still actively refining between steps. First active step is a "
-        "no-op (no previous prediction); detailing begins on the second."
-    )
-    MASK_FN = staticmethod(_mask_delta)
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                **cls._base_inputs(),
-                "ema": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Blend with previous mask. 0 = per-step, 1 = lock the first computed mask."}),
-            }
-        }
-
-
-class SelectiveSigmaDetailerDeltaV2Node(_SSDBase):
-    DESCRIPTION = (
-        "Experimental delta variant. Divides the per-step sigma adjustment by "
-        "the active-step count so the integrated detail push is roughly "
-        "invariant to total step count. Expect detail_amount to need a larger "
-        "value (order ~N_active) than the v1 node for comparable output."
-    )
-    MASK_FN = staticmethod(_mask_delta)
-    NORMALIZE_BY_ACTIVE_STEPS = True
-    MASK_CLIP_PERCENTILE = 0.1
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                **cls._base_inputs(),
-                "ema": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Blend with previous mask. 0 = per-step, 1 = lock the first computed mask."}),
+                "sampler": ("SAMPLER",),
+                "detail_amount": ("FLOAT", {"default": 5.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "start": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "end": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ema": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Blend with previous mask. 0 = per-step, higher = stronger temporal smoothing."}),
                 "mask_clip_percentile": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 0.49, "step": 0.005,
                     "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch. 0 = pure min/max, higher = stronger outlier rejection."}),
             }
         }
+
+    def go(self, sampler, detail_amount, start, end, ema, mask_clip_percentile):
+        def schedule_fn(steps):
+            return make_schedule(steps, start, end, detail_amount)
+
+        mask_params = {"ema": ema, "clip_percentile": mask_clip_percentile}
+        mask_ref = {}
+        ksampler = build_sampler(
+            wrapped_sampler=sampler,
+            make_schedule_fn=schedule_fn,
+            mask_fn=_mask_delta,
+            mask_params=mask_params,
+            mask_ref=mask_ref,
+            normalize_by_active_steps=True,
+        )
+        return (ksampler, mask_ref)
 
 
 class SelectiveSigmaDetailerMaskPreviewNode:

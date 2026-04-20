@@ -6,39 +6,19 @@ import torch.nn.functional as F
 from comfy.samplers import KSAMPLER
 
 
-def make_schedule(
-    steps, start, end, bias, amount, exponent,
-    start_offset, end_offset, fade, smooth,
-):
+def make_schedule(steps, start, end, amount):
     start = min(start, end)
-    mid = start + bias * (end - start)
+    mid = (start + end) / 2
     multipliers = np.zeros(steps)
-
     start_idx, mid_idx, end_idx = [
         int(round(x * (steps - 1))) for x in [start, mid, end]
     ]
-
-    start_values = np.linspace(0, 1, mid_idx - start_idx + 1)
-    if smooth:
-        start_values = 0.5 * (1 - np.cos(start_values * np.pi))
-    start_values = start_values ** exponent
-    if start_values.any():
-        start_values *= amount - start_offset
-        start_values += start_offset
-
-    end_values = np.linspace(1, 0, end_idx - mid_idx + 1)
-    if smooth:
-        end_values = 0.5 * (1 - np.cos(end_values * np.pi))
-    end_values = end_values ** exponent
-    if end_values.any():
-        end_values *= amount - end_offset
-        end_values += end_offset
-
-    multipliers[start_idx : mid_idx + 1] = start_values
-    multipliers[mid_idx : end_idx + 1] = end_values
-    multipliers[:start_idx] = start_offset
-    multipliers[end_idx + 1 :] = end_offset
-    multipliers *= 1 - fade
+    rise = np.linspace(0, 1, mid_idx - start_idx + 1)
+    rise = 0.5 * (1 - np.cos(rise * np.pi)) * amount
+    fall = np.linspace(1, 0, end_idx - mid_idx + 1)
+    fall = 0.5 * (1 - np.cos(fall * np.pi)) * amount
+    multipliers[start_idx : mid_idx + 1] = rise
+    multipliers[mid_idx : end_idx + 1] = fall
     return multipliers
 
 
@@ -62,11 +42,7 @@ def sample_schedule(sigma, sigmas, schedule):
     return torch.lerp(schedule[idxlow], schedule[idxhigh], ratio).item()
 
 
-def postprocess_mask(raw, blur, threshold, gamma, clip_percentile=0.0):
-    if blur > 0:
-        bk = blur * 2 + 1
-        padded = F.pad(raw, (blur, blur, blur, blur), mode="reflect")
-        raw = F.avg_pool2d(padded, bk, stride=1, padding=0)
+def normalize_mask(raw, clip_percentile):
     b = raw.shape[0]
     flat = raw.view(b, -1)
     if clip_percentile > 0:
@@ -80,12 +56,7 @@ def postprocess_mask(raw, blur, threshold, gamma, clip_percentile=0.0):
     else:
         lo = flat.min(dim=1, keepdim=True).values
         hi = flat.max(dim=1, keepdim=True).values
-    norm = ((flat - lo) / (hi - lo + 1e-8)).clamp(0, 1).view_as(raw)
-    if threshold > 0:
-        norm = (norm - threshold).clamp(min=0) / max(1e-8, 1.0 - threshold)
-    if gamma != 1.0:
-        norm = norm.clamp(min=0).pow(gamma)
-    return norm.clamp(0, 1)
+    return ((flat - lo) / (hi - lo + 1e-8)).clamp(0, 1).view_as(raw)
 
 
 def mask_to_preview_image(mask, upscale=8):
@@ -96,22 +67,11 @@ def mask_to_preview_image(mask, upscale=8):
     return m.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
 
 
-def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
-                  mask_fn, mask_params, mask_ref, normalize_by_active_steps=False):
-    """Wraps `wrapped_sampler` with sigma-shift detail blending.
-
-    `mask_fn(denoised, x, sigma, state, params) -> mask [B,1,H,W]` is invoked
-    on every active step (schedule value != 0). The latest mask is written to
-    `mask_ref["mask"]` so a downstream preview node can display it after
-    sampling finishes.
-    """
-
+def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref,
+                  normalize_by_active_steps=False):
     def sampler_function(model, x, sigmas, **kwargs):
-        if cfg_scale_override > 0:
-            cfg_scale = cfg_scale_override
-        else:
-            maybe_cfg = getattr(model.inner_model, "cfg", None)
-            cfg_scale = float(maybe_cfg) if isinstance(maybe_cfg, (int, float)) else 1.0
+        maybe_cfg = getattr(model.inner_model, "cfg", None)
+        cfg_scale = float(maybe_cfg) if isinstance(maybe_cfg, (int, float)) else 1.0
 
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
@@ -161,27 +121,3 @@ def build_sampler(wrapped_sampler, make_schedule_fn, cfg_scale_override,
         )
 
     return KSAMPLER(sampler_function)
-
-
-SCHEDULE_INPUTS = {
-    "detail_amount": ("FLOAT", {"default": 0.4, "min": -100.0, "max": 100.0, "step": 0.01}),
-    "start": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
-    "end": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
-    "bias": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-    "exponent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05}),
-    "start_offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01}),
-    "end_offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01}),
-    "fade": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
-    "smooth": ("BOOLEAN", {"default": True}),
-    "cfg_scale_override": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.5, "round": 0.01}),
-}
-
-
-MASK_COMMON_INPUTS = {
-    "mask_blur": ("INT", {"default": 2, "min": 0, "max": 16, "step": 1,
-        "tooltip": "Smoothing applied to the mask. Softens transitions to avoid seams."}),
-    "mask_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 0.99, "step": 0.01,
-        "tooltip": "Mask values below this are pulled to 0. Higher = stricter targeting."}),
-    "mask_gamma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.05,
-        "tooltip": "Contrast curve on the mask. >1 sharpens, <1 softens."}),
-}

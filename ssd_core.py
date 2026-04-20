@@ -8,17 +8,9 @@ from comfy.samplers import KSAMPLER
 
 def make_schedule(steps, start, end, amount):
     start = min(start, end)
-    mid = (start + end) / 2
     multipliers = np.zeros(steps)
-    start_idx, mid_idx, end_idx = [
-        int(round(x * (steps - 1))) for x in [start, mid, end]
-    ]
-    rise = np.linspace(0, 1, mid_idx - start_idx + 1)
-    rise = 0.5 * (1 - np.cos(rise * np.pi)) * amount
-    fall = np.linspace(1, 0, end_idx - mid_idx + 1)
-    fall = 0.5 * (1 - np.cos(fall * np.pi)) * amount
-    multipliers[start_idx : mid_idx + 1] = rise
-    multipliers[mid_idx : end_idx + 1] = fall
+    start_idx, end_idx = [int(round(x * (steps - 1))) for x in [start, end]]
+    multipliers[start_idx : end_idx + 1] = amount
     return multipliers
 
 

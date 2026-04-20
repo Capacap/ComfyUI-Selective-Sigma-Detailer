@@ -52,12 +52,12 @@ class SelectiveSigmaDetailerDeltaV2Node:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "detail_amount": ("FLOAT", {"default": 5.0, "min": -100.0, "max": 100.0, "step": 0.1}),
-                "start": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "end": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "ema": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05,
+                "detail_amount": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ema": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Blend with previous mask. 0 = per-step, higher = stronger temporal smoothing."}),
-                "mask_clip_percentile": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 0.49, "step": 0.005,
+                "mask_clip_percentile": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 0.49, "step": 0.005,
                     "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch. 0 = pure min/max, higher = stronger outlier rejection."}),
             }
         }

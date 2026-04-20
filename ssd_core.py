@@ -62,21 +62,25 @@ def sample_schedule(sigma, sigmas, schedule):
     return torch.lerp(schedule[idxlow], schedule[idxhigh], ratio).item()
 
 
-def postprocess_mask(raw, blur, threshold, gamma, rank_normalize=False):
+def postprocess_mask(raw, blur, threshold, gamma, clip_percentile=0.0):
     if blur > 0:
         bk = blur * 2 + 1
         padded = F.pad(raw, (blur, blur, blur, blur), mode="reflect")
         raw = F.avg_pool2d(padded, bk, stride=1, padding=0)
     b = raw.shape[0]
     flat = raw.view(b, -1)
-    if rank_normalize:
-        n = flat.shape[1]
-        ranks = flat.argsort(dim=1).argsort(dim=1).float()
-        norm = (ranks / max(1, n - 1)).view_as(raw)
+    if clip_percentile > 0:
+        q = torch.tensor(
+            [clip_percentile, 1.0 - clip_percentile],
+            dtype=flat.dtype, device=flat.device,
+        )
+        bounds = torch.quantile(flat, q, dim=1)
+        lo = bounds[0].unsqueeze(1)
+        hi = bounds[1].unsqueeze(1)
     else:
         lo = flat.min(dim=1, keepdim=True).values
         hi = flat.max(dim=1, keepdim=True).values
-        norm = ((flat - lo) / (hi - lo + 1e-8)).view_as(raw)
+    norm = ((flat - lo) / (hi - lo + 1e-8)).clamp(0, 1).view_as(raw)
     if threshold > 0:
         norm = (norm - threshold).clamp(min=0) / max(1e-8, 1.0 - threshold)
     if gamma != 1.0:

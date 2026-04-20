@@ -48,7 +48,7 @@ def _mask_delta(denoised, x, sigma, state, p):
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
     m = postprocess_mask(
         raw, p["blur"], p["threshold"], p["gamma"],
-        rank_normalize=p.get("rank_normalize", False),
+        clip_percentile=p.get("clip_percentile", 0.0),
     )
     prev_mask = state.get("mask")
     ema = p["ema"]
@@ -70,7 +70,7 @@ class _SSDBase:
 
     MASK_FN = None
     NORMALIZE_BY_ACTIVE_STEPS = False
-    RANK_NORMALIZE_MASK = False
+    MASK_CLIP_PERCENTILE = 0.0
 
     @classmethod
     def _base_inputs(cls):
@@ -83,7 +83,8 @@ class _SSDBase:
     def go(self, sampler, **kwargs):
         sched_kwargs = _pop_schedule_kwargs(kwargs)
         mask_common = _pop_mask_common(kwargs)
-        mask_params = {**mask_common, **kwargs, "rank_normalize": self.RANK_NORMALIZE_MASK}
+        clip_percentile = kwargs.pop("mask_clip_percentile", self.MASK_CLIP_PERCENTILE)
+        mask_params = {**mask_common, **kwargs, "clip_percentile": clip_percentile}
         mask_ref = {}
         ksampler = build_sampler(
             wrapped_sampler=sampler,
@@ -125,7 +126,7 @@ class SelectiveSigmaDetailerDeltaV2Node(_SSDBase):
     )
     MASK_FN = staticmethod(_mask_delta)
     NORMALIZE_BY_ACTIVE_STEPS = True
-    RANK_NORMALIZE_MASK = True
+    MASK_CLIP_PERCENTILE = 0.1
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -134,6 +135,8 @@ class SelectiveSigmaDetailerDeltaV2Node(_SSDBase):
                 **cls._base_inputs(),
                 "ema": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Blend with previous mask. 0 = per-step, 1 = lock the first computed mask."}),
+                "mask_clip_percentile": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 0.49, "step": 0.005,
+                    "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch. 0 = pure min/max, higher = stronger outlier rejection."}),
             }
         }
 

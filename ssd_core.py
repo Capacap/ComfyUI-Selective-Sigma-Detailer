@@ -6,11 +6,10 @@ import torch.nn.functional as F
 from comfy.samplers import KSAMPLER
 
 
-def make_schedule(steps, start, end, amount):
-    start = min(start, end)
+def make_schedule(steps, start, amount):
     multipliers = np.zeros(steps)
-    start_idx, end_idx = [int(round(x * (steps - 1))) for x in [start, end]]
-    multipliers[start_idx : end_idx + 1] = amount
+    start_idx = max(1, int(round(start * (steps - 1))))
+    multipliers[start_idx:] = amount
     return multipliers
 
 

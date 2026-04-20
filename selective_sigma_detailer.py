@@ -16,31 +16,38 @@ from .ssd_core import (
 )
 
 
+_MASK_CLIP_PERCENTILE = 0.2
+_SCHEDULE_START = 0.2
+_MASK_EMA = 0.9
+
+
 def _mask_delta(denoised, x, sigma, state, p):
     prev = state.get("prev_denoised")
     state["prev_denoised"] = denoised.detach()
     if prev is None:
         return None
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
-    m = normalize_mask(raw, p["clip_percentile"])
+    m = normalize_mask(raw, _MASK_CLIP_PERCENTILE)
     prev_mask = state.get("mask")
-    ema = p["ema"]
-    if prev_mask is not None and ema > 0:
+    if prev_mask is not None:
         if prev_mask.shape != m.shape:
             prev_mask = torch.nn.functional.interpolate(
                 prev_mask, size=m.shape[-2:], mode="bilinear", align_corners=False,
             )
-        m = ema * prev_mask + (1 - ema) * m
+        m = _MASK_EMA * prev_mask + (1 - _MASK_EMA) * m
     state["mask"] = m
+    shift = 2 * (p["coverage"] - 0.5)
+    if shift != 0:
+        m = (m + shift).clamp(0, 1)
     return m
 
 
 class SelectiveSigmaDetailerDeltaV2Node:
     DESCRIPTION = (
         "Masks using |denoised_t - denoised_{t-1}| with percentile-clipped "
-        "normalization. Per-step sigma adjustment is divided by the count of "
-        "active schedule steps so detail_amount is roughly step-count "
-        "invariant. First active step is a no-op (no previous prediction)."
+        "normalization. Coverage shifts the mask threshold: 0 empty, 0.5 "
+        "normal, 1.0 full. Per-step sigma adjustment is normalized by active "
+        "step count so intensity is roughly step-count invariant."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER", "SSD_MASK_REF")
@@ -52,21 +59,18 @@ class SelectiveSigmaDetailerDeltaV2Node:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "detail_amount": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
-                "start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "ema": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Blend with previous mask. 0 = per-step, higher = stronger temporal smoothing."}),
-                "mask_clip_percentile": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 0.49, "step": 0.005,
-                    "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch. 0 = pure min/max, higher = stronger outlier rejection."}),
+                "intensity": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1,
+                    "tooltip": "Strength of the sigma adjustment on masked regions."}),
+                "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "0 = empty mask (no effect), 0.5 = normal delta mask, 1.0 = full mask (applied everywhere)."}),
             }
         }
 
-    def go(self, sampler, detail_amount, start, end, ema, mask_clip_percentile):
+    def go(self, sampler, intensity, coverage):
         def schedule_fn(steps):
-            return make_schedule(steps, start, end, detail_amount)
+            return make_schedule(steps, _SCHEDULE_START, intensity)
 
-        mask_params = {"ema": ema, "clip_percentile": mask_clip_percentile}
+        mask_params = {"coverage": coverage}
         mask_ref = {}
         ksampler = build_sampler(
             wrapped_sampler=sampler,

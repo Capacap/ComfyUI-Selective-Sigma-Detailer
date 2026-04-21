@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import os
 import time
 
@@ -167,6 +168,11 @@ class SelectiveSigmaDetailerMaskPreviewNode:
 
         out_dir = folder_paths.get_temp_directory()
         os.makedirs(out_dir, exist_ok=True)
+        for old in glob.glob(os.path.join(out_dir, "ssd_mask_*.png")):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
         filename = f"ssd_mask_{int(time.time() * 1000)}.png"
         path = os.path.join(out_dir, filename)
         arr = (img[0].numpy() * 255).clip(0, 255).astype(np.uint8)

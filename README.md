@@ -1,48 +1,75 @@
 # ComfyUI-Selective-Sigma-Detailer
 
-A ComfyUI custom sampler that boosts detail only in latent regions that are
-already dense at the moment its schedule activates. Smooth regions (skies,
-out-of-focus backgrounds, flat surfaces) are left untouched; busy regions
-(faces, fabric, foliage) get a sigma-shifted pass that sharpens them.
+A ComfyUI custom sampler wrapper in the family of [Detail Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon)
+and its descendants. It sharpens an image mid-sampling by telling the
+denoiser that the remaining noise is smaller than it actually is, which
+nudges the model to commit to higher-frequency structure. The difference is
+that this wrapper does it selectively: only the regions of the latent where
+structure is still forming get the sharpening treatment. Smooth areas are
+left at the normal sigma.
 
-## How it works
+Selectivity exists because global sigma modulation has a failure mode. It
+sharpens everything, including the regions that were supposed to stay
+smooth. Clean skies develop grain, soft bokeh turns crunchy, solid-color
+illustrations lose their flatness. Detail Daemon, MultiplySigmas, and
+similar tricks all share this behavior. If a composition depends on a
+genuinely clean background or a shallow depth of field, a global detailer
+works against you. This node preserves those regions by only applying the
+sigma shift where the model is already drawing detail.
 
-1. Early sampling steps run unmodified so the model can establish composition.
-2. On the first step where the schedule becomes active, a **density mask** is
-   derived from the model's denoised prediction via local latent variance, and
-   then frozen for the rest of the run.
-3. For every subsequent active step, two denoises are computed (normal, and
-   one at a shifted sigma) and blended per-pixel by the mask.
+The mask is built by running the model once at the normal sigma and
+comparing the result against the previous step's prediction. Regions where
+the prediction is still changing step-to-step count as busy. A second pass
+runs at a reduced sigma and gets blended with the first by the mask. This
+means the wrapper costs roughly two model forwards per active step instead
+of one, a meaningful overhead, made less painful by skipping the first 20%
+of steps (composition phase) and tapering off during the last 15%
+(structure locked in). A typical 16-step SDXL run ends up paying for about
+nine detail passes rather than sixteen. Still more expensive than a plain
+sampler or Detail Daemon, worth it specifically when preserving smooth
+regions matters to the composition.
 
-Cost: 2x model calls on active steps only. Inactive steps are free.
+The reason two forwards are required is that sigma is a scalar from the
+denoiser's perspective. You cannot pass a spatial sigma map in a single
+model call without retraining. Running twice and blending by the mask is
+the only way to get region-selective behavior out of the existing model.
 
-## Node
+## Nodes
 
-**Selective Sigma Detailer** (`sampling/custom_sampling/samplers`)
+All nodes live under `sampling/custom_sampling/samplers`.
 
-Wraps a `SAMPLER` and returns a new `SAMPLER`. Drop it between your base
-sampler (`KSamplerSelect`, etc.) and `SamplerCustom`.
+**Selective Sigma Detailer.** The main node. Wraps a `SAMPLER` and returns a
+new `SAMPLER` to drop between `KSamplerSelect` and `SamplerCustom`. Two
+parameters: `intensity` (default 16.0) sets the per-step strength of the
+sigma shift, where 16.0 corresponds to a 0.1 fractional reduction; negative
+values soften instead of sharpen. `coverage` (default 0.5) shifts the mask
+threshold. At 0 it disables the detail pass entirely, at 0.5 it uses the
+raw normalized mask, at 1.0 it saturates the mask and effectively applies
+the shift everywhere (equivalent to running Detail Daemon on the same
+schedule).
 
-### Schedule parameters
+**Selective Sigma Detailer (Debug).** Same sampler wrapper with the internal
+constants (`start`, `ema`, `mask_clip_percentile`) exposed as inputs and a
+`mask_ref` output. Use when diagnosing unexpected behavior or experimenting
+with different constants. Defaults match the main node.
 
-`detail_amount`, `start`, `end`, `bias`, `exponent`, `start_offset`,
-`end_offset`, `fade`, `smooth`, `cfg_scale_override` control when and how
-strongly the detail pass fires, following the same schedule shape as
-Detail Daemon.
+**Selective Sigma Detailer (Debug Preview).** Takes the `mask_ref` from the
+Debug sampler and renders the last captured mask as a preview image.
+Latent passthrough is required so ComfyUI runs it after sampling finishes.
 
-### Mask parameters
+Each run prints a stats line to the console showing how many steps paid
+for the detail pass, the count of short-circuits by reason, and the total
+forwards saved:
 
-- `variance_kernel` — window size for local variance (odd, 3–15). Larger is coarser.
-- `mask_blur` — smoothing applied after variance. Softens transitions.
-- `mask_threshold` — values below this are pulled to 0. Higher = stricter targeting.
-- `mask_gamma` — contrast curve on the mask. >1 sharpens, <1 softens.
-- `save_mask_preview` — dumps the frozen mask as a PNG to ComfyUI's temp dir.
+```
+[SSD] calls=16 detail=9 skip: schedule=6 activity=0 first=1 range=0 (7 forwards saved)
+```
 
 ## Credits
 
-Inspired by [ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon)
-by Jonseed; the schedule shape used to gate the active window follows the same
-idea.
+Schedule gating and the sigma-shift mechanic adapted from
+[ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon)
+by Jonseed.
 
 ## License
 

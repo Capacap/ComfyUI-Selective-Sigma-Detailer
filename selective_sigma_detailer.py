@@ -46,7 +46,7 @@ def _mask_delta(denoised, x, sigma, state, p):
     return m
 
 
-class SelectiveSigmaDetailerDeltaV2Node:
+class SelectiveSigmaDetailerNode:
     DESCRIPTION = (
         "Masks using |denoised_t - denoised_{t-1}| with percentile-clipped "
         "normalization. Coverage shifts the mask threshold: 0 empty, 0.5 "

@@ -63,9 +63,6 @@ _PER_STEP_ADJUSTMENT_SCALE = 0.1 / 16
 
 def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref):
     def sampler_function(model, x, sigmas, **kwargs):
-        maybe_cfg = getattr(model.inner_model, "cfg", None)
-        cfg_scale = float(maybe_cfg) if isinstance(maybe_cfg, (int, float)) else 1.0
-
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
         )
@@ -96,7 +93,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                     mode="bilinear", align_corners=False,
                 )
 
-            adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment * cfg_scale)
+            adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment)
             denoised_detailed = model(x, adjusted_sigma, **extra_args)
             m = mask.to(denoised_normal)
             return denoised_normal * (1 - m) + denoised_detailed * m

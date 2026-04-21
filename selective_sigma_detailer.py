@@ -47,8 +47,8 @@ class SelectiveSigmaDetailerDeltaV2Node:
     DESCRIPTION = (
         "Masks using |denoised_t - denoised_{t-1}| with percentile-clipped "
         "normalization. Coverage shifts the mask threshold: 0 empty, 0.5 "
-        "normal, 1.0 full. Per-step sigma adjustment is normalized by active "
-        "step count so intensity is roughly step-count invariant."
+        "normal, 1.0 full. Per-step sigma adjustment is calibrated against a "
+        "16-active-step reference so intensity is roughly step-count invariant."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER",)
@@ -82,7 +82,6 @@ class SelectiveSigmaDetailerDeltaV2Node:
             mask_fn=_mask_delta,
             mask_params=mask_params,
             mask_ref={},
-            normalize_by_active_steps=True,
         )
         return (ksampler,)
 
@@ -215,7 +214,6 @@ class SelectiveSigmaDetailerDebugNode:
             mask_fn=_mask_delta,
             mask_params=mask_params,
             mask_ref=mask_ref,
-            normalize_by_active_steps=True,
         )
         return (ksampler, mask_ref)
 

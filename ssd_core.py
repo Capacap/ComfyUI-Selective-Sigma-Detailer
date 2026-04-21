@@ -58,8 +58,10 @@ def mask_to_preview_image(mask, upscale=8):
     return m.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
 
 
-def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref,
-                  normalize_by_active_steps=False):
+_PER_STEP_ADJUSTMENT_SCALE = 0.1 / 16
+
+
+def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref):
     def sampler_function(model, x, sigmas, **kwargs):
         maybe_cfg = getattr(model.inner_model, "cfg", None)
         cfg_scale = float(maybe_cfg) if isinstance(maybe_cfg, (int, float)) else 1.0
@@ -67,11 +69,6 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
         )
-        if normalize_by_active_steps:
-            active_count = int((schedule != 0).sum())
-            adjustment_scale = 1.0 / max(1, active_count)
-        else:
-            adjustment_scale = 1.0
         sigmas_cpu = sigmas.detach().clone().cpu()
         sigma_max = float(sigmas_cpu[0])
         sigma_min = float(sigmas_cpu[-1]) + 1e-5
@@ -83,7 +80,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
             if not (sigma_min <= sigma_float <= sigma_max):
                 return model(x, sigma, **extra_args)
 
-            adjustment = sample_schedule(sigma_float, sigmas_cpu, schedule) * 0.1 * adjustment_scale
+            adjustment = sample_schedule(sigma_float, sigmas_cpu, schedule) * _PER_STEP_ADJUSTMENT_SCALE
             if adjustment == 0.0:
                 return model(x, sigma, **extra_args)
 

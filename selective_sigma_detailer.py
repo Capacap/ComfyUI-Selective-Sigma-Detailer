@@ -22,6 +22,8 @@ _MASK_EMA = 0.9
 
 
 def _mask_delta(denoised, x, sigma, state, p):
+    if p["coverage"] <= 0.0:
+        return None
     prev = state.get("prev_denoised")
     state["prev_denoised"] = denoised.detach()
     if prev is None:

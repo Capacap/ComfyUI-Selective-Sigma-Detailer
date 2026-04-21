@@ -23,22 +23,43 @@ _MASK_EMA = 0.9
 
 
 def _mask_delta(denoised, x, sigma, state, p):
+    """Build a detail mask from the change between consecutive denoised predictions.
+
+    Regions where the model's prediction is moving step-to-step are regions
+    still gaining structure, which is where the extra detail pass is useful.
+    Flat/settled regions produce a small delta and get left alone.
+
+    coverage semantics: an additive threshold shift applied AFTER the EMA and
+    AFTER writing the smoothed mask back to state, so the shift doesn't
+    compound through the feedback loop. 0 -> empty mask (caller short-circuits
+    before the second model call), 0.5 -> raw normalized delta, 1.0 ->
+    saturates to 1 everywhere.
+    """
+    # coverage=0 means "apply nothing" — skip the delta math entirely so the
+    # wrapper can early-return and avoid the second model call.
     if p["coverage"] <= 0.0:
         return None
     prev = state.get("prev_denoised")
     state["prev_denoised"] = denoised.detach()
+    # First step has no prior frame to diff against.
     if prev is None:
         return None
+    # Channel-mean of the absolute delta collapses the 4-channel latent into a
+    # single-channel activity heatmap.
     raw = (denoised - prev).abs().mean(dim=1, keepdim=True)
     m = normalize_mask(raw, p["clip_percentile"])
     prev_mask = state.get("mask")
     ema = p["ema"]
     if prev_mask is not None and ema > 0:
+        # Upscaling samplers can change latent resolution mid-run; resize the
+        # carried-over mask rather than dropping it.
         if prev_mask.shape != m.shape:
             prev_mask = torch.nn.functional.interpolate(
                 prev_mask, size=m.shape[-2:], mode="bilinear", align_corners=False,
             )
         m = ema * prev_mask + (1 - ema) * m
+    # Store the pre-shift mask so the coverage offset doesn't compound through
+    # the EMA feedback on subsequent steps.
     state["mask"] = m
     shift = 2 * (p["coverage"] - 0.5)
     if shift != 0:

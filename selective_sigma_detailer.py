@@ -63,7 +63,7 @@ class SelectiveSigmaDetailerNode:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "intensity": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1,
+                "intensity": ("FLOAT", {"default": 16.0, "min": -100.0, "max": 100.0, "step": 0.1,
                     "tooltip": "Strength of the sigma adjustment on masked regions."}),
                 "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "0 = empty mask (no effect), 0.5 = normal delta mask, 1.0 = full mask (applied everywhere)."}),
@@ -107,7 +107,7 @@ class SelectiveSigmaDetailerDebugNode:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "intensity": ("FLOAT", {"default": 2.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "intensity": ("FLOAT", {"default": 16.0, "min": -100.0, "max": 100.0, "step": 0.1}),
                 "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "start": ("FLOAT", {"default": _SCHEDULE_START, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Fraction of schedule to skip before applying detail. At least 1 step is always skipped."}),

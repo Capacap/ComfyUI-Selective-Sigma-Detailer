@@ -63,6 +63,7 @@ _PER_STEP_ADJUSTMENT_SCALE = 0.1 / 16
 
 def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref):
     def sampler_function(model, x, sigmas, **kwargs):
+        mask_ref.clear()
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
         )

@@ -15,17 +15,35 @@ import torch.nn.functional as F
 from comfy.samplers import KSAMPLER
 
 
+# Fraction of the schedule at which the tail linear taper begins, and the
+# fraction at which it hits zero. Between these, intensity falls linearly;
+# after _TAIL_TAPER_END, steps are exactly zero and skip via the
+# adjustment==0 fast path (no second model call). Rationale: late steps have
+# composition locked in; full-strength detail injection there tends to
+# over-sharpen without adding information.
+_TAIL_TAPER_START = 0.70
+_TAIL_TAPER_END = 0.85
+
+
 def make_schedule(steps, start, amount):
     """Build a per-step intensity schedule.
 
-    Returns a length-`steps` array of zeros, with `amount` filled in from
-    `start_idx` onward. The first few steps are left at zero because they set
-    overall composition; detail injection there tends to warp layout rather
-    than sharpen. At least one step is always skipped.
+    Three regions:
+      [0, start)               -> 0 (composition-setting prologue)
+      [start, taper_start)     -> full `amount`
+      [taper_start, taper_end] -> linearly decays to 0
+      (taper_end, steps)       -> 0 (skipped via adjustment==0)
+
+    At least one step is always skipped at the start.
     """
     multipliers = np.zeros(steps)
     start_idx = max(1, int(round(start * (steps - 1))))
-    multipliers[start_idx:] = amount
+    taper_start_idx = max(start_idx + 1, int(round(_TAIL_TAPER_START * (steps - 1))))
+    taper_end_idx = max(taper_start_idx + 1, int(round(_TAIL_TAPER_END * (steps - 1))))
+    multipliers[start_idx:taper_start_idx] = amount
+    taper_len = taper_end_idx - taper_start_idx + 1
+    if taper_len > 1:
+        multipliers[taper_start_idx:taper_end_idx + 1] = np.linspace(amount, 0.0, taper_len)
     return multipliers
 
 
@@ -103,6 +121,10 @@ def mask_to_preview_image(mask, upscale=8):
 _INTENSITY_REFERENCE = 16.0
 _REFERENCE_PER_STEP_SHIFT = 0.1
 
+# When the mask's mean activity is below this floor, the detail pass would
+# contribute <2% to the blend — not worth a full model forward. Skip it.
+_MIN_MASK_ACTIVITY = 0.02
+
 
 def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref):
     """Wrap an existing SAMPLER with the two-pass detail injection.
@@ -136,6 +158,8 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         # mask for EMA, etc.). Scoped to this sampler_function call so each
         # run starts clean.
         state = {}
+        # Per-run bookkeeping for the end-of-run summary.
+        stats = {"detail": 0, "skip_activity": 0, "skip_schedule": 0, "skip_first": 0, "skip_range": 0}
 
         def model_wrapper(x, sigma, **extra_args):
             # Reduce to a single scalar: batched sigma tensors are all equal
@@ -145,18 +169,28 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
             # Out-of-range sigmas come from ancestral noise or solver probes
             # at boundaries — not actual denoising steps on our schedule.
             if not (sigma_min <= sigma_float <= sigma_max):
+                stats["skip_range"] += 1
                 return model(x, sigma, **extra_args)
 
             intensity = sample_schedule(sigma_float, sigmas_cpu, schedule)
             adjustment = intensity * _REFERENCE_PER_STEP_SHIFT / _INTENSITY_REFERENCE
             if adjustment == 0.0:
+                stats["skip_schedule"] += 1
                 return model(x, sigma, **extra_args)
 
             denoised_normal = model(x, sigma, **extra_args)
             mask = mask_fn(denoised_normal, x, sigma, state, mask_params)
             if mask is None:
+                stats["skip_first"] += 1
                 return denoised_normal
             mask_ref["mask"] = mask.detach()
+
+            # Skip the second forward when the mask is barely active —
+            # the blend would round to denoised_normal anyway.
+            if mask.mean().item() < _MIN_MASK_ACTIVITY:
+                stats["skip_activity"] += 1
+                return denoised_normal
+            stats["detail"] += 1
 
             if mask.shape[-2:] != denoised_normal.shape[-2:]:
                 mask = F.interpolate(
@@ -176,8 +210,18 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         for k in ("inner_model", "sigmas"):
             if hasattr(model, k):
                 setattr(model_wrapper, k, getattr(model, k))
-        return wrapped_sampler.sampler_function(
+        result = wrapped_sampler.sampler_function(
             model_wrapper, x, sigmas, **kwargs, **wrapped_sampler.extra_options
         )
+        total = sum(stats.values())
+        saved = total - stats["detail"]
+        print(
+            f"[SSD] calls={total} detail={stats['detail']} "
+            f"skip: schedule={stats['skip_schedule']} "
+            f"activity={stats['skip_activity']} "
+            f"first={stats['skip_first']} range={stats['skip_range']} "
+            f"({saved} forwards saved)"
+        )
+        return result
 
     return KSAMPLER(sampler_function)

@@ -40,13 +40,17 @@ All nodes live under `sampling/custom_sampling/samplers`.
 
 **Selective Sigma Detailer.** The main node. Wraps a `SAMPLER` and returns a
 new `SAMPLER` to drop between `KSamplerSelect` and `SamplerCustom`. Two
-parameters: `intensity` (default 16.0) sets the per-step strength of the
-sigma shift, where 16.0 corresponds to a 0.1 fractional reduction; negative
-values soften instead of sharpen. `coverage` (default 0.5) shifts the mask
-threshold. At 0 it disables the detail pass entirely, at 0.5 it uses the
-raw normalized mask, at 1.0 it saturates the mask and effectively applies
-the shift everywhere (equivalent to running Detail Daemon on the same
-schedule).
+parameters: `strength` (default 0.1) is the peak per-step fraction of sigma
+removed during the detail pass, so 0.1 means "shave 10% off sigma at peak";
+negative values soften instead of sharpen. `coverage` (default 0.5) shifts
+the mask threshold. At 0 it disables the detail pass entirely, at 0.5 it
+uses the raw normalized mask, at 1.0 it saturates the mask and applies the
+shift everywhere (and skips the normal pass, leaving one forward per active
+step, equivalent to running Detail Daemon on the same schedule).
+
+Fast paths: `strength = 0` or `coverage = 0` returns the input sampler
+unmodified with no wrapping. `coverage = 1` skips the normal forward per
+active step and runs only the detail pass.
 
 **Selective Sigma Detailer (Debug).** Same sampler wrapper with the internal
 constants (`start`, `ema`, `mask_clip_percentile`) exposed as inputs and a
@@ -62,8 +66,14 @@ for the detail pass, the count of short-circuits by reason, and the total
 forwards saved:
 
 ```
-[SSD] calls=16 detail=9 skip: schedule=6 activity=0 first=1 range=0 (7 forwards saved)
+[SSD] calls=16 detail=9 full=0 skip: schedule=6 activity=0 first=1 range=0 (7 forwards saved)
 ```
+
+`detail` is the two-forward path, `full` is the one-forward coverage=1
+path, and `skip` breaks down no-op calls by cause: `schedule` (outside the
+active window), `activity` (mask too sparse to matter), `first` (no prior
+prediction to diff against yet), and `range` (sigma outside the schedule,
+typically ancestral or solver-probe calls).
 
 ## Credits
 

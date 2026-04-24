@@ -1,10 +1,12 @@
 """Core helpers for the Selective Sigma Detailer sampler wrapper.
 
-The wrapper runs the model twice per step: once at the normal sigma to get a
-reference prediction, and once at a slightly reduced sigma to get a
-more-detailed prediction. The two are blended by a mask derived from how much
-the prediction changed between the previous step and this one, so "busy"
-regions receive extra detail while flat regions are left alone.
+Default flow is two model forwards per active step: once at the normal sigma
+for a reference prediction, once at a slightly reduced sigma for a more-
+detailed prediction. The two are blended by a mask derived from how much the
+prediction changed between the previous step and this one, so "busy" regions
+receive extra detail while flat regions are left alone. When coverage is
+saturated (>=1.0) the mask would collapse to all-ones, so the normal pass is
+skipped and the step runs a single adjusted-sigma forward.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from comfy.samplers import KSAMPLER
 
 
 # Fraction of the schedule at which the tail linear taper begins, and the
-# fraction at which it hits zero. Between these, intensity falls linearly;
+# fraction at which it hits zero. Between these, strength falls linearly;
 # after _TAIL_TAPER_END, steps are exactly zero and skip via the
 # adjustment==0 fast path (no second model call). Rationale: late steps have
 # composition locked in; full-strength detail injection there tends to
@@ -25,12 +27,18 @@ _TAIL_TAPER_START = 0.70
 _TAIL_TAPER_END = 0.85
 
 
-def make_schedule(steps, start, amount):
-    """Build a per-step intensity schedule.
+def make_schedule(steps, start, strength):
+    """Build a per-step sigma-reduction schedule.
+
+    `strength` is the peak per-step fraction of sigma removed during the
+    detail pass: adjusted_sigma = sigma * (1 - strength). E.g. 0.1 means
+    "shave 10% off sigma at peak". Deliberately NOT divided by step count —
+    the sampler's own integration already applies step-size normalization,
+    so dividing again would make short runs Nx stronger than long runs.
 
     Three regions:
       [0, start)               -> 0 (composition-setting prologue)
-      [start, taper_start)     -> full `amount`
+      [start, taper_start)     -> full `strength`
       [taper_start, taper_end] -> linearly decays to 0
       (taper_end, steps)       -> 0 (skipped via adjustment==0)
 
@@ -40,10 +48,10 @@ def make_schedule(steps, start, amount):
     start_idx = max(1, int(round(start * (steps - 1))))
     taper_start_idx = max(start_idx + 1, int(round(_TAIL_TAPER_START * (steps - 1))))
     taper_end_idx = max(taper_start_idx + 1, int(round(_TAIL_TAPER_END * (steps - 1))))
-    multipliers[start_idx:taper_start_idx] = amount
+    multipliers[start_idx:taper_start_idx] = strength
     taper_len = taper_end_idx - taper_start_idx + 1
     if taper_len > 1:
-        multipliers[taper_start_idx:taper_end_idx + 1] = np.linspace(amount, 0.0, taper_len)
+        multipliers[taper_start_idx:taper_end_idx + 1] = np.linspace(strength, 0.0, taper_len)
     return multipliers
 
 
@@ -113,14 +121,6 @@ def mask_to_preview_image(mask, upscale=8):
     return m.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
 
 
-# Calibration anchor: at intensity=16 the per-step sigma shift is 0.1.
-# Deliberately NOT divided by the actual step count — the sampler's own
-# integration already applies step-size normalization, so dividing again would
-# make short runs Nx stronger than long runs. Keep the shift per-step-constant
-# across step counts.
-_INTENSITY_REFERENCE = 16.0
-_REFERENCE_PER_STEP_SHIFT = 0.1
-
 # When the mask's mean activity is below this floor, the detail pass would
 # contribute <2% to the blend — not worth a full model forward. Skip it.
 _MIN_MASK_ACTIVITY = 0.02
@@ -142,7 +142,19 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
     `mask_ref` is a caller-owned dict used as a one-slot channel for the debug
     preview node. It's cleared on every new sampler invocation so stale masks
     from prior runs don't leak into the preview.
+
+    Coverage fast paths (checked once per run, not per step):
+      coverage <= 0 -> no-op: skip the detail pass entirely; mask_fn is still
+                       called so it can maintain its state (but its output is
+                       ignored). In practice _mask_delta returns None on
+                       coverage==0 anyway, so we take the general no-mask path.
+      coverage >= 1 -> full: the blend would collapse to denoised_detailed, so
+                       skip the normal forward and the mask_fn entirely. Just
+                       run the adjusted-sigma pass. One forward per step
+                       instead of two.
     """
+    full_coverage = mask_params.get("coverage", 0.5) >= 1.0
+
     def sampler_function(model, x, sigmas, **kwargs):
         mask_ref.clear()
         schedule = torch.tensor(
@@ -159,7 +171,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         # run starts clean.
         state = {}
         # Per-run bookkeeping for the end-of-run summary.
-        stats = {"detail": 0, "skip_activity": 0, "skip_schedule": 0, "skip_first": 0, "skip_range": 0}
+        stats = {"detail": 0, "skip_activity": 0, "skip_schedule": 0, "skip_first": 0, "skip_range": 0, "full": 0}
 
         def model_wrapper(x, sigma, **extra_args):
             # Reduce to a single scalar: batched sigma tensors are all equal
@@ -172,11 +184,17 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                 stats["skip_range"] += 1
                 return model(x, sigma, **extra_args)
 
-            intensity = sample_schedule(sigma_float, sigmas_cpu, schedule)
-            adjustment = intensity * _REFERENCE_PER_STEP_SHIFT / _INTENSITY_REFERENCE
+            adjustment = sample_schedule(sigma_float, sigmas_cpu, schedule)
             if adjustment == 0.0:
                 stats["skip_schedule"] += 1
                 return model(x, sigma, **extra_args)
+
+            # Coverage=1.0: the mask would saturate to all-ones, so the normal
+            # pass and mask_fn are both dead weight. Run only the detail pass.
+            if full_coverage:
+                stats["full"] += 1
+                adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment)
+                return model(x, adjusted_sigma, **extra_args)
 
             denoised_normal = model(x, sigma, **extra_args)
             mask = mask_fn(denoised_normal, x, sigma, state, mask_params)
@@ -216,7 +234,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         total = sum(stats.values())
         saved = total - stats["detail"]
         print(
-            f"[SSD] calls={total} detail={stats['detail']} "
+            f"[SSD] calls={total} detail={stats['detail']} full={stats['full']} "
             f"skip: schedule={stats['skip_schedule']} "
             f"activity={stats['skip_activity']} "
             f"first={stats['skip_first']} range={stats['skip_range']} "

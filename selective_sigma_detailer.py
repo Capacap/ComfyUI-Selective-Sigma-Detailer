@@ -71,8 +71,8 @@ class SelectiveSigmaDetailerNode:
     DESCRIPTION = (
         "Masks using |denoised_t - denoised_{t-1}| with percentile-clipped "
         "normalization. Coverage shifts the mask threshold: 0 empty, 0.5 "
-        "normal, 1.0 full. Per-step sigma adjustment is calibrated against a "
-        "16-active-step reference so intensity is roughly step-count invariant."
+        "normal, 1.0 full (skips the normal pass). Strength is the peak "
+        "per-step fraction of sigma removed during the detail pass."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER",)
@@ -84,16 +84,22 @@ class SelectiveSigmaDetailerNode:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "intensity": ("FLOAT", {"default": 16.0, "min": -100.0, "max": 100.0, "step": 0.1,
-                    "tooltip": "Strength of the sigma adjustment on masked regions."}),
+                "strength": ("FLOAT", {"default": 0.1, "min": -1.0, "max": 1.0, "step": 0.005,
+                    "tooltip": "Peak per-step fraction of sigma removed on masked regions. 0.1 = -10% sigma at peak."}),
                 "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "0 = empty mask (no effect), 0.5 = normal delta mask, 1.0 = full mask (applied everywhere)."}),
+                    "tooltip": "0 = empty mask (no effect), 0.5 = normal delta mask, 1.0 = full mask (applied everywhere, skips the normal pass)."}),
             }
         }
 
-    def go(self, sampler, intensity, coverage):
+    def go(self, sampler, strength, coverage):
+        # No path through the wrapper can produce a different result than the
+        # input sampler — skip wrapping entirely so there's no per-call
+        # overhead and no misleading [SSD] log line.
+        if strength == 0.0 or coverage <= 0.0:
+            return (sampler,)
+
         def schedule_fn(steps):
-            return make_schedule(steps, _SCHEDULE_START, intensity)
+            return make_schedule(steps, _SCHEDULE_START, strength)
 
         mask_params = {
             "coverage": coverage,
@@ -128,7 +134,7 @@ class SelectiveSigmaDetailerDebugNode:
         return {
             "required": {
                 "sampler": ("SAMPLER",),
-                "intensity": ("FLOAT", {"default": 16.0, "min": -100.0, "max": 100.0, "step": 0.1}),
+                "strength": ("FLOAT", {"default": 0.1, "min": -1.0, "max": 1.0, "step": 0.005}),
                 "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "start": ("FLOAT", {"default": _SCHEDULE_START, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Fraction of schedule to skip before applying detail. At least 1 step is always skipped."}),
@@ -139,9 +145,15 @@ class SelectiveSigmaDetailerDebugNode:
             }
         }
 
-    def go(self, sampler, intensity, coverage, start, ema, mask_clip_percentile):
+    def go(self, sampler, strength, coverage, start, ema, mask_clip_percentile):
+        # Same short-circuit as the main node. Return an empty mask_ref so
+        # the preview node downstream still has something to read (it
+        # already handles the no-mask case by rendering zeros).
+        if strength == 0.0 or coverage <= 0.0:
+            return (sampler, {})
+
         def schedule_fn(steps):
-            return make_schedule(steps, start, intensity)
+            return make_schedule(steps, start, strength)
 
         mask_params = {
             "coverage": coverage,

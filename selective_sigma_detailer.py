@@ -18,7 +18,8 @@ from .ssd_core import (
 
 
 _MASK_CLIP_PERCENTILE = 0.2
-_SCHEDULE_START = 0.2
+_SCHEDULE_START = 0.1
+_SCHEDULE_END = 0.9
 _MASK_EMA = 0.9
 
 
@@ -99,7 +100,7 @@ class SelectiveSigmaDetailerNode:
             return (sampler,)
 
         def schedule_fn(steps):
-            return make_schedule(steps, _SCHEDULE_START, strength)
+            return make_schedule(steps, _SCHEDULE_START, _SCHEDULE_END, strength)
 
         mask_params = {
             "coverage": coverage,
@@ -138,6 +139,8 @@ class SelectiveSigmaDetailerDebugNode:
                 "coverage": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "start": ("FLOAT", {"default": _SCHEDULE_START, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Fraction of schedule to skip before applying detail. At least 1 step is always skipped."}),
+                "end": ("FLOAT", {"default": _SCHEDULE_END, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Fraction of schedule at which the tail taper hits zero. At least 1 step at the end is always clean."}),
                 "ema": ("FLOAT", {"default": _MASK_EMA, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Temporal mask smoothing. 0 = per-step, higher = stronger carryover across steps."}),
                 "mask_clip_percentile": ("FLOAT", {"default": _MASK_CLIP_PERCENTILE, "min": 0.0, "max": 0.49, "step": 0.005,
@@ -145,7 +148,7 @@ class SelectiveSigmaDetailerDebugNode:
             }
         }
 
-    def go(self, sampler, strength, coverage, start, ema, mask_clip_percentile):
+    def go(self, sampler, strength, coverage, start, end, ema, mask_clip_percentile):
         # Same short-circuit as the main node. Return an empty mask_ref so
         # the preview node downstream still has something to read (it
         # already handles the no-mask case by rendering zeros).
@@ -153,7 +156,7 @@ class SelectiveSigmaDetailerDebugNode:
             return (sampler, {})
 
         def schedule_fn(steps):
-            return make_schedule(steps, start, strength)
+            return make_schedule(steps, start, end, strength)
 
         mask_params = {
             "coverage": coverage,

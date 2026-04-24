@@ -22,10 +22,11 @@ comparing the result against the previous step's prediction. Regions where
 the prediction is still changing step-to-step count as busy. A second pass
 runs at a reduced sigma and gets blended with the first by the mask. This
 means the wrapper costs roughly two model forwards per active step instead
-of one, a meaningful overhead, made less painful by skipping the first 20%
-of steps (composition phase) and tapering off during the last 15%
-(structure locked in). A typical 16-step SDXL run ends up paying for about
-nine detail passes rather than sixteen. Still more expensive than a plain
+of one, a meaningful overhead, made less painful by skipping the first 10%
+of steps (composition phase) and tapering off so the last 10% is clean
+(structure locked in, plus headroom for the sampler to clean residual
+noise). A typical 16-step SDXL run ends up paying for about twelve detail
+passes rather than sixteen. Still more expensive than a plain
 sampler or Detail Daemon, worth it specifically when preserving smooth
 regions matters to the composition.
 
@@ -53,9 +54,9 @@ unmodified with no wrapping. `coverage = 1` skips the normal forward per
 active step and runs only the detail pass.
 
 **Selective Sigma Detailer (Debug).** Same sampler wrapper with the internal
-constants (`start`, `ema`, `mask_clip_percentile`) exposed as inputs and a
-`mask_ref` output. Use when diagnosing unexpected behavior or experimenting
-with different constants. Defaults match the main node.
+constants (`start`, `end`, `ema`, `mask_clip_percentile`) exposed as inputs
+and a `mask_ref` output. Use when diagnosing unexpected behavior or
+experimenting with different constants. Defaults match the main node.
 
 **Selective Sigma Detailer (Debug Preview).** Takes the `mask_ref` from the
 Debug sampler and renders the last captured mask as a preview image.

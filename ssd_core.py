@@ -17,17 +17,16 @@ import torch.nn.functional as F
 from comfy.samplers import KSAMPLER
 
 
-# Fraction of the schedule at which the tail linear taper begins, and the
-# fraction at which it hits zero. Between these, strength falls linearly;
-# after _TAIL_TAPER_END, steps are exactly zero and skip via the
-# adjustment==0 fast path (no second model call). Rationale: late steps have
-# composition locked in; full-strength detail injection there tends to
-# over-sharpen without adding information.
-_TAIL_TAPER_START = 0.70
-_TAIL_TAPER_END = 0.85
+# Width (as a fraction of the schedule) of the linear taper that eases the
+# detail pass down from full strength to zero at the tail. The taper starts
+# at `end - _TAIL_TAPER_WIDTH` and finishes at `end`. Kept narrow so the
+# active window dominates; the taper's job is to avoid a cliff, not to be a
+# second phase. Not user-exposed: a smoothing detail, not a knob worth
+# turning.
+_TAIL_TAPER_WIDTH = 0.15
 
 
-def make_schedule(steps, start, strength):
+def make_schedule(steps, start, end, strength):
     """Build a per-step sigma-reduction schedule.
 
     `strength` is the peak per-step fraction of sigma removed during the
@@ -36,22 +35,32 @@ def make_schedule(steps, start, strength):
     the sampler's own integration already applies step-size normalization,
     so dividing again would make short runs Nx stronger than long runs.
 
-    Three regions:
-      [0, start)               -> 0 (composition-setting prologue)
-      [start, taper_start)     -> full `strength`
-      [taper_start, taper_end] -> linearly decays to 0
-      (taper_end, steps)       -> 0 (skipped via adjustment==0)
+    Schedule shape:
+      [0, start_idx)              -> 0 (composition-setting prologue)
+      [start_idx, taper_start)    -> full `strength`
+      [taper_start, end_idx]      -> linearly decays to 0
+      (end_idx, steps)            -> 0 (skipped via adjustment==0)
 
-    At least one step is always skipped at the start.
+    Invariants enforced here regardless of `start`/`end` values:
+      - at least one clean step at the head (index 0 is always 0)
+      - at least one clean step at the tail (index steps-1 is always 0)
+    These give the sampler room to set composition before detail kicks in
+    and to clean leftover noise after the last detail step.
     """
     multipliers = np.zeros(steps)
     start_idx = max(1, int(round(start * (steps - 1))))
-    taper_start_idx = max(start_idx + 1, int(round(_TAIL_TAPER_START * (steps - 1))))
-    taper_end_idx = max(taper_start_idx + 1, int(round(_TAIL_TAPER_END * (steps - 1))))
+    end_idx = min(steps - 2, int(round(end * (steps - 1))))
+    # Degenerate step counts (e.g. 3 steps with start=0.1, end=0.9) may leave
+    # no room for any active region after the head/tail clean-step invariants
+    # are enforced. Bail out with an all-zero schedule rather than inverting.
+    if end_idx <= start_idx:
+        return multipliers
+    taper_start_idx = max(start_idx + 1, int(round((end - _TAIL_TAPER_WIDTH) * (steps - 1))))
+    taper_start_idx = min(taper_start_idx, end_idx)
     multipliers[start_idx:taper_start_idx] = strength
-    taper_len = taper_end_idx - taper_start_idx + 1
+    taper_len = end_idx - taper_start_idx + 1
     if taper_len > 1:
-        multipliers[taper_start_idx:taper_end_idx + 1] = np.linspace(strength, 0.0, taper_len)
+        multipliers[taper_start_idx:end_idx + 1] = np.linspace(strength, 0.0, taper_len)
     return multipliers
 
 

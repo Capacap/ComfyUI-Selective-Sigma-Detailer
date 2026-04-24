@@ -74,7 +74,24 @@ forwards saved:
 path, and `skip` breaks down no-op calls by cause: `schedule` (outside the
 active window), `activity` (mask too sparse to matter), `first` (no prior
 prediction to diff against yet), and `range` (sigma outside the schedule,
-typically ancestral or solver-probe calls).
+typically ancestral or solver-probe calls). A trailing `cfg++attenuated`
+tag appears when the wrapped sampler is a CFG++ variant (see below).
+
+## CFG++ samplers
+
+CFG++ samplers (`_cfg_pp` variants) decompose each step into two signals
+that must come from the same model call: the returned `denoised` (x0
+target) and a separately captured `uncond_denoised` (noise direction). Our
+two-forward blend mixes `denoised` across two sigmas while the uncond stays
+tied to one, which introduces a cross-sigma term that amplifies effective
+strength substantially at typical mid-mask coverage. The wrapper detects
+CFG++ by inspecting the sampler's `post_cfg_function` hook chain and
+attenuates `strength` by 0.15 to compensate. The calibration is accurate at
+mid-mask and over-attenuates as the mask saturates toward 1; if you want
+full-strength detail on a CFG++ sampler, prefer `coverage = 1` (single-pass
+fast path, same behavior as plain Detail Daemon on CFG++). Selective
+behavior between 0 and 1 on CFG++ is a best-effort approximation rather
+than a mathematically clean blend.
 
 ## Credits
 

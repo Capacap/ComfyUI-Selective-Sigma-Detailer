@@ -135,17 +135,38 @@ def mask_to_preview_image(mask, upscale=8):
 _MIN_MASK_ACTIVITY = 0.02
 
 
+# CFG++ samplers pull the noise direction from `uncond_denoised` captured via
+# a post_cfg_function hook, separate from the returned `denoised`. Our two-
+# forward blend mixes `denoised` across two sigmas while the uncond stays
+# tied to one, so the implicit guidance signal (denoised - uncond) gains a
+# cross-sigma term that amplifies the effective strength. Empirically tuned
+# against mid-mask behavior (the typical operating point); over-attenuates
+# as the mask saturates toward 1 (where coverage=1 fast path is a better
+# choice anyway). Detected per-run by inspecting model_options for the
+# CFG++ hook.
+_CFG_PP_STRENGTH_ATTENUATION = 0.15
+
+
+def _has_cfg_pp_hook(extra_args):
+    """True if the sampler has installed a CFG++ post_cfg_function hook."""
+    model_options = extra_args.get("model_options") or {}
+    hooks = model_options.get("sampler_post_cfg_function") or ()
+    return len(hooks) > 0
+
+
 def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_ref):
     """Wrap an existing SAMPLER with the two-pass detail injection.
 
     Flow per denoiser call:
-      1. Run the wrapped model at the original sigma -> `denoised_normal`.
-      2. Ask `mask_fn` for a mask derived from `denoised_normal` vs. the
-         previous step's prediction (stored in `state`). `mask_fn` may return
-         None on the first step (no previous frame yet) to skip detail.
-      3. Run the model again at a slightly reduced sigma. A lower sigma tells
-         the denoiser to assume less remaining noise, so it commits to
-         higher-frequency structure -> `denoised_detailed`.
+      1. Run the model at a slightly reduced sigma -> `denoised_detailed`.
+         A lower sigma tells the denoiser to assume less remaining noise, so
+         it commits to higher-frequency structure.
+      2. Run the model at the original sigma -> `denoised_normal`. This call
+         is last so that CFG++ samplers, which capture `uncond_denoised` via a
+         post_cfg_function hook, end up with the uncond aligned to the sigma
+         they actually use in their step formula.
+      3. Ask `mask_fn` for a mask from `denoised_normal` vs. the previous
+         step's prediction (stored in `state`). Returns None on the first step.
       4. Blend the two predictions by the mask.
 
     `mask_ref` is a caller-owned dict used as a one-slot channel for the debug
@@ -160,7 +181,12 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
       coverage >= 1 -> full: the blend would collapse to denoised_detailed, so
                        skip the normal forward and the mask_fn entirely. Just
                        run the adjusted-sigma pass. One forward per step
-                       instead of two.
+                       instead of two. Caveat: on CFG++ samplers this leaves
+                       uncond_denoised captured at the adjusted sigma while
+                       the sampler uses it at the original — same class of
+                       sigma mismatch as plain Detail Daemon on CFG++. Fix
+                       would be to trail a normal-sigma call, which negates
+                       the fast path; left as a known limitation.
     """
     full_coverage = mask_params.get("coverage", 0.5) >= 1.0
 
@@ -181,6 +207,8 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         state = {}
         # Per-run bookkeeping for the end-of-run summary.
         stats = {"detail": 0, "skip_activity": 0, "skip_schedule": 0, "skip_first": 0, "skip_range": 0, "full": 0}
+        # Detected on first in-range call (we need extra_args to inspect).
+        cfg_pp_state = {"checked": False, "active": False}
 
         def model_wrapper(x, sigma, **extra_args):
             # Reduce to a single scalar: batched sigma tensors are all equal
@@ -198,6 +226,10 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                 stats["skip_schedule"] += 1
                 return model(x, sigma, **extra_args)
 
+            if not cfg_pp_state["checked"]:
+                cfg_pp_state["active"] = _has_cfg_pp_hook(extra_args)
+                cfg_pp_state["checked"] = True
+
             # Coverage=1.0: the mask would saturate to all-ones, so the normal
             # pass and mask_fn are both dead weight. Run only the detail pass.
             if full_coverage:
@@ -205,15 +237,32 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                 adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment)
                 return model(x, adjusted_sigma, **extra_args)
 
+            if cfg_pp_state["active"]:
+                adjustment = adjustment * _CFG_PP_STRENGTH_ATTENUATION
+
+            # Detail first, normal last. CFG++ samplers install a
+            # post_cfg_function hook that captures `uncond_denoised` into the
+            # sampler's closure on every model call, and use it to compute the
+            # noise direction `to_d(x, sigma_i, uncond_denoised)` in their
+            # step formula. Only the LAST captured value survives, so ending
+            # on the original sigma keeps the side channel aligned with the
+            # sigma the sampler plugs into its formula. For non-CFG++ samplers
+            # the order is irrelevant (they only read the returned `denoised`)
+            # so this is safe as the single path. Cost: the activity and
+            # first-step short-circuits no longer save a forward, because the
+            # mask isn't available until after the normal pass has already
+            # run. Acceptable — both skip reasons are rare relative to the
+            # active blend steps.
+            adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment)
+            denoised_detailed = model(x, adjusted_sigma, **extra_args)
             denoised_normal = model(x, sigma, **extra_args)
+
             mask = mask_fn(denoised_normal, x, sigma, state, mask_params)
             if mask is None:
                 stats["skip_first"] += 1
                 return denoised_normal
             mask_ref["mask"] = mask.detach()
 
-            # Skip the second forward when the mask is barely active —
-            # the blend would round to denoised_normal anyway.
             if mask.mean().item() < _MIN_MASK_ACTIVITY:
                 stats["skip_activity"] += 1
                 return denoised_normal
@@ -224,11 +273,6 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                     mask, size=denoised_normal.shape[-2:],
                     mode="bilinear", align_corners=False,
                 )
-
-            # Clamp the scale floor away from zero so the model never sees
-            # sigma=0 (which some denoisers handle as a special case).
-            adjusted_sigma = sigma * max(1e-6, 1.0 - adjustment)
-            denoised_detailed = model(x, adjusted_sigma, **extra_args)
             m = mask.to(denoised_normal)
             return denoised_normal * (1 - m) + denoised_detailed * m
 
@@ -242,12 +286,13 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
         )
         total = sum(stats.values())
         saved = total - stats["detail"]
+        cfg_pp_tag = " cfg++attenuated" if cfg_pp_state["active"] else ""
         print(
             f"[SSD] calls={total} detail={stats['detail']} full={stats['full']} "
             f"skip: schedule={stats['skip_schedule']} "
             f"activity={stats['skip_activity']} "
             f"first={stats['skip_first']} range={stats['skip_range']} "
-            f"({saved} forwards saved)"
+            f"({saved} forwards saved){cfg_pp_tag}"
         )
         return result
 

@@ -23,6 +23,9 @@ _SCHEDULE_END = 0.9
 _MASK_EMA = 0.9
 
 
+_MASK_OVERRIDES = ("off", "ones", "half", "zeros")
+
+
 def _mask_delta(denoised, x, sigma, state, p):
     """Build a detail mask from the change between consecutive denoised predictions.
 
@@ -36,6 +39,15 @@ def _mask_delta(denoised, x, sigma, state, p):
     before the second model call), 0.5 -> raw normalized delta, 1.0 ->
     saturates to 1 everywhere.
     """
+    # Debug override: force the mask to a constant so the blend path can be
+    # compared against the coverage=1 fast path (ones), the pure baseline
+    # (zeros), or a flat mid-value (half). Bypasses coverage shift and EMA.
+    override = p.get("mask_override", "off")
+    if override != "off":
+        shape = (denoised.shape[0], 1, denoised.shape[2], denoised.shape[3])
+        fill = {"ones": 1.0, "half": 0.5, "zeros": 0.0}[override]
+        return torch.full(shape, fill, device=denoised.device, dtype=denoised.dtype)
+
     # coverage=0 means "apply nothing" — skip the delta math entirely so the
     # wrapper can early-return and avoid the second model call.
     if p["coverage"] <= 0.0:
@@ -145,10 +157,12 @@ class SelectiveSigmaDetailerDebugNode:
                     "tooltip": "Temporal mask smoothing. 0 = per-step, higher = stronger carryover across steps."}),
                 "mask_clip_percentile": ("FLOAT", {"default": _MASK_CLIP_PERCENTILE, "min": 0.0, "max": 0.49, "step": 0.005,
                     "tooltip": "Clip the top/bottom fraction of delta values before min/max stretch."}),
+                "mask_override": (list(_MASK_OVERRIDES), {"default": "off",
+                    "tooltip": "Force the mask to a constant for blend-path diagnostics. 'ones' at coverage<1 should match the coverage=1 fast path; 'zeros' should match baseline; 'half' isolates pure x0 blending."}),
             }
         }
 
-    def go(self, sampler, strength, coverage, start, end, ema, mask_clip_percentile):
+    def go(self, sampler, strength, coverage, start, end, ema, mask_clip_percentile, mask_override):
         # Same short-circuit as the main node. Return an empty mask_ref so
         # the preview node downstream still has something to read (it
         # already handles the no-mask case by rendering zeros).
@@ -162,6 +176,7 @@ class SelectiveSigmaDetailerDebugNode:
             "coverage": coverage,
             "ema": ema,
             "clip_percentile": mask_clip_percentile,
+            "mask_override": mask_override,
         }
         mask_ref = {}
         ksampler = build_sampler(

@@ -35,9 +35,9 @@ def _mask_delta(denoised, x, sigma, state, p):
 
     coverage semantics: an additive threshold shift applied AFTER the EMA and
     AFTER writing the smoothed mask back to state, so the shift doesn't
-    compound through the feedback loop. 0 -> empty mask (caller short-circuits
-    before the second model call), 0.5 -> raw normalized delta, 1.0 ->
-    saturates to 1 everywhere.
+    compound through the feedback loop. 0.5 -> raw normalized delta, 1.0 ->
+    saturates to 1 everywhere. (coverage <= 0 is short-circuited at the node
+    boundary and never reaches here.)
     """
     # Debug override: force the mask to a constant so the blend path can be
     # compared against the coverage=1 fast path (ones), the pure baseline
@@ -48,10 +48,6 @@ def _mask_delta(denoised, x, sigma, state, p):
         fill = {"ones": 1.0, "half": 0.5, "zeros": 0.0}[override]
         return torch.full(shape, fill, device=denoised.device, dtype=denoised.dtype)
 
-    # coverage=0 means "apply nothing" — skip the delta math entirely so the
-    # wrapper can early-return and avoid the second model call.
-    if p["coverage"] <= 0.0:
-        return None
     prev = state.get("prev_denoised")
     state["prev_denoised"] = denoised.detach()
     # First step has no prior frame to diff against.

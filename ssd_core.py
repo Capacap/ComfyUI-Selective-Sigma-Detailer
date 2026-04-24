@@ -1,12 +1,14 @@
 """Core helpers for the Selective Sigma Detailer sampler wrapper.
 
-Default flow is two model forwards per active step: once at the normal sigma
-for a reference prediction, once at a slightly reduced sigma for a more-
-detailed prediction. The two are blended by a mask derived from how much the
+Default flow is two model forwards per active step: one at a slightly
+reduced sigma for a more-detailed prediction, then one at the normal sigma
+for the reference. The two are blended by a mask derived from how much the
 prediction changed between the previous step and this one, so "busy" regions
 receive extra detail while flat regions are left alone. When coverage is
 saturated (>=1.0) the mask would collapse to all-ones, so the normal pass is
-skipped and the step runs a single adjusted-sigma forward.
+skipped and the step runs a single adjusted-sigma forward. See
+`build_sampler` for the rationale behind the detail-first, normal-last
+ordering.
 """
 
 from __future__ import annotations
@@ -131,7 +133,9 @@ def mask_to_preview_image(mask, upscale=8):
 
 
 # When the mask's mean activity is below this floor, the detail pass would
-# contribute <2% to the blend — not worth a full model forward. Skip it.
+# contribute <2% to the blend. Skip the blend and return denoised_normal;
+# the detail forward has already run by this point (we need it before the
+# mask is available) so this saves blend math, not a forward.
 _MIN_MASK_ACTIVITY = 0.02
 
 
@@ -173,11 +177,7 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
     preview node. It's cleared on every new sampler invocation so stale masks
     from prior runs don't leak into the preview.
 
-    Coverage fast paths (checked once per run, not per step):
-      coverage <= 0 -> no-op: skip the detail pass entirely; mask_fn is still
-                       called so it can maintain its state (but its output is
-                       ignored). In practice _mask_delta returns None on
-                       coverage==0 anyway, so we take the general no-mask path.
+    Coverage fast path (checked once per run, not per step):
       coverage >= 1 -> full: the blend would collapse to denoised_detailed, so
                        skip the normal forward and the mask_fn entirely. Just
                        run the adjusted-sigma pass. One forward per step
@@ -187,11 +187,22 @@ def build_sampler(wrapped_sampler, make_schedule_fn, mask_fn, mask_params, mask_
                        sigma mismatch as plain Detail Daemon on CFG++. Fix
                        would be to trail a normal-sigma call, which negates
                        the fast path; left as a known limitation.
+
+    (coverage <= 0 is short-circuited at the node boundary and never reaches
+    build_sampler.)
     """
     full_coverage = mask_params.get("coverage", 0.5) >= 1.0
 
     def sampler_function(model, x, sigmas, **kwargs):
         mask_ref.clear()
+        # Populate mask_ref up-front at full coverage so the debug preview
+        # reflects the fast-path behavior (mask is effectively all-ones)
+        # rather than rendering the empty default.
+        if full_coverage:
+            mask_ref["mask"] = torch.ones(
+                (x.shape[0], 1, x.shape[2], x.shape[3]),
+                device=x.device, dtype=x.dtype,
+            )
         schedule = torch.tensor(
             make_schedule_fn(len(sigmas) - 1), dtype=torch.float32, device="cpu"
         )

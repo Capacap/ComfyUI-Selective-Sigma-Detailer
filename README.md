@@ -35,6 +35,18 @@ denoiser's perspective. You cannot pass a spatial sigma map in a single
 model call without retraining. Running twice and blending by the mask is
 the only way to get region-selective behavior out of the existing model.
 
+## Examples
+
+Stylized SDXL portrait (Juggernaut XL) used for both sweeps. Same seed and prompt across all cells.
+
+**Coverage sweep at strength = +0.10.** The bottom row shows the mask captured during sampling. At `c=0.00` no detail pass runs, at `c=1.00` the mask saturates and the single-pass fast path applies. The intermediate cells show the mask selecting the character's outlines, hair, and embroidered collar while leaving the window and flat background untouched.
+
+![Coverage sweep](docs/coverage_comparison.png)
+
+**Strength sweep at coverage = 0.5.** Coverage is held mid-range so the mask is doing real selective work, not saturating. This is the regime the wrapper is built for: outlines, eyelashes, and braid edges sharpen as strength rises, while the low-density window light and out-of-focus background stay clean. Negative strength softens line work and pushes the model toward a more photographic reading of the same prompt. The `s=+0.20` cell is included as a deliberate over-strength reference; `s=+0.10` is closer to a usable setting.
+
+![Strength sweep](docs/strength_comparison.png)
+
 ## Nodes
 
 All nodes live under `sampling/custom_sampling/samplers`.

@@ -194,7 +194,8 @@ class SelectiveSigmaDetailerMaskPreviewNode:
     DESCRIPTION = (
         "Debug preview for the mask captured during sampling. Pairs with the "
         "Debug sampler's mask_ref output. The latent passthrough forces this "
-        "node to run after sampling."
+        "node to run after sampling. Exposes the rendered mask as an IMAGE "
+        "output for downstream wiring (e.g. composing into a comparison grid)."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("LATENT", "IMAGE")

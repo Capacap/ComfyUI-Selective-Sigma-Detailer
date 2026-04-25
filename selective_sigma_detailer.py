@@ -159,10 +159,15 @@ class SelectiveSigmaDetailerDebugNode:
         }
 
     def go(self, sampler, strength, coverage, start, end, ema, mask_clip_percentile, mask_override):
-        # Same short-circuit as the main node. Return an empty mask_ref so
-        # the preview node downstream still has something to read (it
-        # already handles the no-mask case by rendering zeros).
+        # Same short-circuit as the main node. Populate mask_ref so the
+        # preview node downstream renders the conceptually-correct mask:
+        # full white at coverage>=1 (matches the non-zero-strength full
+        # coverage fast path), zeros otherwise. Real latent dims aren't
+        # known here since sampling never runs; the preview upscales the
+        # placeholder to a viewable size.
         if strength == 0.0 or coverage <= 0.0:
+            if coverage >= 1.0 and strength == 0.0:
+                return (sampler, {"mask": torch.ones(1, 1, 64, 64)})
             return (sampler, {})
 
         def schedule_fn(steps):
@@ -192,8 +197,8 @@ class SelectiveSigmaDetailerMaskPreviewNode:
         "node to run after sampling."
     )
     CATEGORY = "sampling/custom_sampling/samplers"
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("latent",)
+    RETURN_TYPES = ("LATENT", "IMAGE")
+    RETURN_NAMES = ("latent", "image")
     FUNCTION = "preview"
     OUTPUT_NODE = True
 
@@ -227,5 +232,5 @@ class SelectiveSigmaDetailerMaskPreviewNode:
 
         return {
             "ui": {"images": [{"filename": filename, "subfolder": "", "type": "temp"}]},
-            "result": (latent,),
+            "result": (latent, img),
         }

@@ -37,15 +37,39 @@ the only way to get region-selective behavior out of the existing model.
 
 ## Examples
 
-Stylized SDXL portrait (Juggernaut XL) used for both sweeps. Same seed and prompt across all cells.
+Two checkpoint families are shown to demonstrate that the wrapper is architecture-level rather than tuned to a single style: Juggernaut XL for photographic realism and an Illustrious-family checkpoint for stylized anime. Within each sweep the seed is fixed; the seed differs between the coverage and strength sweeps to vary the composition.
 
-**Coverage sweep at strength = +0.10.** The bottom row shows the mask captured during sampling. At `c=0.00` no detail pass runs, at `c=1.00` the mask saturates and the single-pass fast path applies. The intermediate cells show the mask selecting the character's outlines, hair, and embroidered collar while leaving the window and flat background untouched.
+### Realistic (Juggernaut XL)
 
-![Coverage sweep](docs/coverage_comparison.png)
+**Coverage sweep at strength = +0.10.** The bottom row shows the mask captured during sampling. At `c=0.00` no detail pass runs; at `c=1.00` the mask saturates and the single-pass fast path applies. Intermediate cells show the mask concentrating on the face, freckles, and hair, with low-density regions like the sky receiving substantially attenuated treatment rather than full protection. The mask is a soft weighting, not a binary gate, so subtle changes outside the high-density area are expected.
 
-**Strength sweep at coverage = 0.5.** Coverage is held mid-range so the mask is doing real selective work, not saturating. This is the regime the wrapper is built for: outlines, eyelashes, and braid edges sharpen as strength rises, while the low-density window light and out-of-focus background stay clean. Negative strength softens line work and pushes the model toward a more photographic reading of the same prompt. The `s=+0.20` cell is included as a deliberate over-strength reference; `s=+0.10` is closer to a usable setting.
+![Coverage sweep (realistic)](docs/realistic_coverage_comparison.png)
 
-![Strength sweep](docs/strength_comparison.png)
+**Strength sweep at coverage = 0.5.** Coverage is held mid-range so the mask is doing real selective work, not saturating. Skin micro-detail and fabric weave sharpen as strength rises while low-density regions stay close to the baseline. Negative strength softens toward a smoother, more painterly reading. The `s=+0.20` cell is a deliberate over-strength reference; `s=+0.10` is closer to a usable setting.
+
+![Strength sweep (realistic)](docs/realistic_strength_comparison.png)
+
+### Anime (Illustrious)
+
+Same axes as above, included to show behaviour on lineart-heavy output where the detail boost reads as crisper outlines and denser hatching rather than skin or fabric texture.
+
+**Coverage sweep at strength = +0.10.** The mask concentrates on the character's outlines, hair strands, and dress trim; the foliage backdrop and dappled light receive a much weaker shift but are not fully isolated from the detail pass.
+
+![Coverage sweep (anime)](docs/anime_coverage_comparison.png)
+
+**Strength sweep at coverage = 0.5.** Negative strength softens linework toward a painterly reading; positive strength tightens outlines and adds detail to hair, eyes, and the autumn foliage behind the character. The effect is particularly visible on the sunglasses, where the reflections sharpen and gain definition as strength rises.
+
+![Strength sweep (anime)](docs/anime_strength_comparison.png)
+
+## Example workflows
+
+Drop any of these into ComfyUI to load a working graph. They use the
+Illustrious-family `waiIllustriousSDXL` checkpoint; swap in your own SDXL
+checkpoint if you don't have it.
+
+- [`example_workflows/ssd_simple.json`](example_workflows/ssd_simple.json) — minimal txt2img with Selective Sigma Detailer as the sampler.
+- [`example_workflows/ssd_hiresfix.json`](example_workflows/ssd_hiresfix.json) — base sample → latent upscale → Selective Sigma Detailer second pass, packaged as a subgraph.
+- [`example_workflows/ssd_debug.json`](example_workflows/ssd_debug.json) — Debug sampler + Debug Preview wired to visualise the mask alongside a normal run.
 
 ## Nodes
 

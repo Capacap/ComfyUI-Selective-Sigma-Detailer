@@ -35,6 +35,19 @@ denoiser's perspective. You cannot pass a spatial sigma map in a single
 model call without retraining. Running twice and blending by the mask is
 the only way to get region-selective behavior out of the existing model.
 
+## Install
+
+**Via ComfyUI Manager (recommended).** Open Manager, search for `Selective Sigma Detailer`, install, restart ComfyUI. The node is published on the [Comfy Registry](https://registry.comfy.org/publishers/capacap/nodes/comfyui-selective-sigma-detailer) and Manager pulls from there directly.
+
+**Manual.** Clone into your `custom_nodes/` directory:
+
+```
+cd ComfyUI/custom_nodes
+git clone https://github.com/Capacap/ComfyUI-Selective-Sigma-Detailer
+```
+
+Restart ComfyUI. There are no extra dependencies beyond what ComfyUI itself ships.
+
 ## Examples
 
 Two checkpoint families are shown to demonstrate that the wrapper is architecture-level rather than tuned to a single style: Juggernaut XL for photographic realism and an Illustrious-family checkpoint for stylized anime. Within each sweep the seed is fixed; the seed differs between the coverage and strength sweeps to vary the composition.

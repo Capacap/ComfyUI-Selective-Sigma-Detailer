@@ -4,9 +4,10 @@ A ComfyUI custom sampler wrapper in the family of [Detail Daemon](https://github
 and its descendants. It sharpens an image mid-sampling by telling the
 denoiser that the remaining noise is smaller than it actually is, which
 nudges the model to commit to higher-frequency structure. The difference is
-that this wrapper does it selectively: only the regions of the latent where
-structure is still forming get the sharpening treatment. Smooth areas are
-left at the normal sigma.
+that this wrapper does it selectively: the strongest shift lands on regions
+where structure is still forming, and smooth or settled regions receive a
+substantially attenuated shift rather than the full effect. The mask is a
+soft weighting, not a binary gate.
 
 Selectivity exists because global sigma modulation has a failure mode. It
 sharpens everything, including the regions that were supposed to stay
@@ -14,8 +15,9 @@ smooth. Clean skies develop grain, soft bokeh turns crunchy, solid-color
 illustrations lose their flatness. Detail Daemon, MultiplySigmas, and
 similar tricks all share this behavior. If a composition depends on a
 genuinely clean background or a shallow depth of field, a global detailer
-works against you. This node preserves those regions by only applying the
-sigma shift where the model is already drawing detail.
+works against you. This node concentrates the shift on regions the model
+is already drawing detail in, so smooth regions receive a much weaker dose
+of the same effect rather than the full hit.
 
 The mask is built by running the model once at the normal sigma and
 comparing the result against the previous step's prediction. Regions where
